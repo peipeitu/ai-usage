@@ -29,9 +29,11 @@
       "package.json"
     ],
     "mac": {
+      "artifactName": "ai-usage-${version}-macos-${arch}.${ext}",
       "category": "public.app-category.developer-tools"
     },
     "linux": {
+      "artifactName": "ai-usage-${version}-linux-${arch}.${ext}",
       "target": [
         "AppImage",
         "deb"
@@ -39,6 +41,7 @@
       "category": "Development"
     },
     "win": {
+      "artifactName": "ai-usage-${version}-windows-${arch}.${ext}",
       "target": "nsis"
     }
   }
