@@ -9,9 +9,9 @@
     "dev": "electron .",
     "start": "electron .",
     "test": "node --test",
-    "package:mac": "electron-builder --mac",
-    "package:win": "electron-builder --win",
-    "package:linux": "electron-builder --linux"
+    "package:mac": "electron-builder --mac --publish never",
+    "package:win": "electron-builder --win --publish never",
+    "package:linux": "electron-builder --linux --publish never"
   },
   "dependencies": {
     "sql.js": "^1.11.0"
