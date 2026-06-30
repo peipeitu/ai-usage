@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Build installer artifacts"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            package-script: package:mac
+            artifact-name: ai-usage-macos
+            artifact-path: dist/*
+          - os: windows-latest
+            package-script: package:win
+            artifact-name: ai-usage-windows
+            artifact-path: dist/*
+          - os: ubuntu-latest
+            package-script: package:linux
+            artifact-name: ai-usage-linux
+            artifact-path: dist/*
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Package
+        if: ${{ inputs.package }}
+        run: npm run ${{ matrix.package-script }}
+
+      - name: Upload artifact
+        if: ${{ inputs.package }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+          retention-days: 7

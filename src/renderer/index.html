@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Usage</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <strong>AI Usage</strong>
+            <span>Usage monitor</span>
+          </div>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Primary navigation">
+          <button id="homeButton" class="nav-button primary active" type="button">概览</button>
+          <button id="settingsButton" class="nav-button" type="button">设置</button>
+        </nav>
+
+        <section class="sidebar-usage" aria-label="Period usage">
+          <span>剩余用量</span>
+          <strong id="sidebarRemainingUsage">-</strong>
+          <small id="sidebarPeriodMeta">近 30 天</small>
+        </section>
+
+        <section class="account-pill" aria-label="Codex account">
+          <div id="accountInitials" class="account-avatar">CD</div>
+          <div>
+            <strong id="accountName">Codex</strong>
+            <span id="accountPlan">Codex</span>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="workspace-topbar">
+          <div>
+            <p id="viewEyebrow" class="eyebrow">Codex usage</p>
+            <h1 id="viewTitle">概览</h1>
+          </div>
+          <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
+            <span aria-hidden="true">↻</span>
+          </button>
+        </header>
+
+        <section id="errorPanel" class="error-panel" hidden></section>
+
+        <section id="homeView">
+          <div class="overview-meta">
+            <span>数据源</span>
+            <strong>Codex</strong>
+            <span id="overviewPeriod">近 30 天</span>
+            <span>本地日志估算</span>
+          </div>
+
+          <section class="hero-metrics" aria-label="Codex featured summary">
+            <article class="hero-metric">
+              <span>今日费用</span>
+              <strong id="todayCost">-</strong>
+            </article>
+            <article class="hero-metric">
+              <span id="periodCostLabel">近 30 天费用</span>
+              <strong id="periodCost">-</strong>
+              <small id="periodUsagePercent">-</small>
+            </article>
+            <article class="hero-metric">
+              <span id="periodTokensLabel">近 30 天 token 用量</span>
+              <strong id="periodTokens">-</strong>
+            </article>
+            <article class="hero-metric">
+              <span>最近 token 用量</span>
+              <strong id="latestTokenUsage">-</strong>
+            </article>
+          </section>
+
+          <section class="summary-grid" aria-label="Codex summary">
+            <article class="metric">
+              <span>总会话</span>
+              <strong id="threadsTotal">-</strong>
+            </article>
+            <article class="metric">
+              <span>活跃</span>
+              <strong id="threadsActive">-</strong>
+            </article>
+            <article class="metric">
+              <span>总 token</span>
+              <strong id="tokensTotal">-</strong>
+            </article>
+            <article class="metric">
+              <span>近 7 天更新</span>
+              <strong id="updatedThisWeek">-</strong>
+            </article>
+          </section>
+
+          <section class="content-grid">
+            <article class="panel wide">
+              <div class="panel-heading">
+                <h2 id="activityTitle">近 30 天趋势</h2>
+                <span id="lastUpdated">-</span>
+              </div>
+              <div class="chart-wrap">
+                <div id="dailyChart" class="daily-chart"></div>
+                <div id="chartTooltip" class="chart-tooltip" hidden></div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>剩余用量</h2>
+                <span id="rateLimitUpdated">-</span>
+              </div>
+              <div id="rateLimitList" class="limit-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>模型</h2>
+              </div>
+              <div id="modelList" class="rank-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>运行来源</h2>
+              </div>
+              <div id="sourceList" class="rank-list"></div>
+            </article>
+
+            <article class="panel wide">
+              <div class="panel-heading">
+                <h2>工作区</h2>
+              </div>
+              <div id="workspaceList" class="rank-list columns"></div>
+            </article>
+
+            <article class="panel wide recent-panel">
+              <div class="panel-heading">
+                <h2>最近会话</h2>
+              </div>
+              <div id="recentThreads" class="thread-list"></div>
+            </article>
+          </section>
+        </section>
+
+        <section id="settingsView" class="settings-view" hidden>
+          <article class="panel wide settings-panel">
+            <div class="panel-heading">
+              <h2>设置</h2>
+              <span id="settingsStatus">-</span>
+            </div>
+
+            <div class="settings-list">
+              <label class="setting-row">
+                <span>AI 服务</span>
+                <div class="provider-options" role="radiogroup" aria-label="AI 服务">
+                  <button class="provider-option active" type="button" aria-checked="true">
+                    <span>Codex</span>
+                  </button>
+                  <button class="provider-option" type="button" disabled>
+                    <span>Claude Code</span>
+                    <em>开发中</em>
+                  </button>
+                  <button class="provider-option" type="button" disabled>
+                    <span>Cursor</span>
+                    <em>开发中</em>
+                  </button>
+                </div>
+              </label>
+
+              <label class="setting-row">
+                <span>Codex 数据目录</span>
+                <div class="setting-control folder-control">
+                  <code id="codexHomeValue">-</code>
+                  <button id="chooseHomeButton" class="secondary-button" type="button">选择目录</button>
+                </div>
+              </label>
+
+              <label class="setting-row">
+                <span>主题</span>
+                <select id="themeSelect">
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
+              </label>
+
+              <label class="setting-row">
+                <span>主题色</span>
+                <div class="accent-options" role="radiogroup" aria-label="主题色">
+                  <button class="swatch" type="button" data-accent="blue" aria-label="Blue"></button>
+                  <button class="swatch" type="button" data-accent="turquoise" aria-label="Turquoise"></button>
+                  <button class="swatch" type="button" data-accent="green" aria-label="Green"></button>
+                  <button class="swatch" type="button" data-accent="purple" aria-label="Purple"></button>
+                  <button class="swatch" type="button" data-accent="red" aria-label="Red"></button>
+                  <button class="swatch" type="button" data-accent="orange" aria-label="Orange"></button>
+                  <button class="swatch" type="button" data-accent="graphite" aria-label="Graphite"></button>
+                </div>
+              </label>
+
+              <label class="setting-row">
+                <span>图表周期</span>
+                <div class="period-control">
+                  <div class="period-presets" aria-label="图表周期快捷选择">
+                    <button type="button" data-days="7">一周</button>
+                    <button type="button" data-days="30">一个月</button>
+                    <button type="button" data-days="90">三个月</button>
+                  </div>
+                  <label class="days-input">
+                    <input id="chartDaysInput" type="number" min="7" max="365" step="1" />
+                    <span>天</span>
+                  </label>
+                </div>
+              </label>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
