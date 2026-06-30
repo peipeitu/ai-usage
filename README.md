@@ -1,5 +1,9 @@
 # AI Usage
 
+[![GitHub](https://img.shields.io/badge/GitHub-peipeitu%2Fai--usage-24292f?logo=github)](https://github.com/peipeitu/ai-usage)
+[![Issues](https://img.shields.io/github/issues/peipeitu/ai-usage)](https://github.com/peipeitu/ai-usage/issues)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding usage statistics. It reads local data in read-only mode and shows recent usage, token estimates, model distribution, workspace distribution, and recent sessions.
 
 ## Supported AI Sources
@@ -34,6 +38,14 @@ Run tests:
 ```sh
 npm test
 ```
+
+## Feedback
+
+Bug reports, feature requests, and usage questions are welcome in [GitHub Issues](https://github.com/peipeitu/ai-usage/issues).
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
 
 ## Packaging
 

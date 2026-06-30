@@ -398,6 +398,38 @@ body[data-platform="darwin"] .sidebar-drag-region {
   white-space: nowrap;
 }
 
+.sidebar-footer {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.project-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.project-links a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.project-links a:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--accent-soft);
+}
+
 .workspace {
   min-width: 0;
   padding: 22px 26px 34px;
@@ -461,6 +493,10 @@ body[data-platform="darwin"] .workspace-topbar {
   border-radius: 8px;
   padding: 10px;
   background: var(--panel);
+}
+
+.sidebar-footer .account-pill {
+  margin-top: 0;
 }
 
 .account-avatar {

@@ -4,6 +4,7 @@ use std::{
   fs::{self, File},
   io::{BufRead, BufReader},
   path::{Path, PathBuf},
+  process::Command,
 };
 
 use base64::{engine::general_purpose, Engine};
@@ -306,6 +307,31 @@ fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
 #[tauri::command]
 fn start_window_drag(window: tauri::Window) -> Result<(), String> {
   window.start_dragging().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+  let allowed_urls = [
+    "https://github.com/peipeitu/ai-usage",
+    "https://github.com/peipeitu/ai-usage/issues",
+  ];
+
+  if !allowed_urls.contains(&url.as_str()) {
+    return Err("URL is not allowed".to_string());
+  }
+
+  #[cfg(target_os = "macos")]
+  let status = Command::new("open").arg(&url).status();
+
+  #[cfg(target_os = "windows")]
+  let status = Command::new("cmd").args(["/C", "start", "", &url]).status();
+
+  #[cfg(all(unix, not(target_os = "macos")))]
+  let status = Command::new("xdg-open").arg(&url).status();
+
+  status
+    .map_err(|error| error.to_string())
+    .and_then(|status| status.success().then_some(()).ok_or_else(|| "Unable to open URL".to_string()))
 }
 
 fn read_stats_for_provider(settings: &Settings, provider: &str) -> Result<Stats, String> {
@@ -1183,7 +1209,8 @@ fn main() {
       update_settings,
       get_stats,
       choose_home,
-      start_window_drag
+      start_window_drag,
+      open_external
     ])
     .run(tauri::generate_context!())
     .expect("error while running AI Usage");

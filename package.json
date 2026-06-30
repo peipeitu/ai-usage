@@ -1,13 +1,21 @@
 {
   "name": "ai-usage",
   "version": "0.1.0",
-  "private": true,
   "description": "A cross-platform desktop dashboard for local AI coding usage statistics.",
   "desktopName": "ai-usage",
+  "license": "MIT",
   "author": {
     "name": "peipeitu",
     "email": "peipeitu@users.noreply.github.com"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peipeitu/ai-usage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/peipeitu/ai-usage/issues"
+  },
+  "homepage": "https://github.com/peipeitu/ai-usage#readme",
   "type": "commonjs",
   "scripts": {
     "dev": "tauri dev",

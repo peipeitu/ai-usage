@@ -1,11 +1,14 @@
 const tauriCore = window.__TAURI__?.core;
 const tauriWindow = window.__TAURI__?.window;
+const REPOSITORY_URL = "https://github.com/peipeitu/ai-usage";
+const ISSUE_URL = "https://github.com/peipeitu/ai-usage/issues";
 const aiUsage = window.aiUsage || {
   platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
   getStats: (provider) => tauriCore.invoke("get_stats", { provider }),
   chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
   getSettings: () => tauriCore.invoke("get_settings"),
   updateSettings: (settings) => tauriCore.invoke("update_settings", { settings }),
+  openExternal: (url) => tauriCore.invoke("open_external", { url }),
   startWindowDrag: async () => {
     const currentWindow = tauriWindow?.getCurrentWindow?.();
     if (currentWindow?.startDragging) {
@@ -54,6 +57,8 @@ const I18N = {
     overview: "概览",
     settings: "设置",
     preferences: "偏好设置",
+    repository: "仓库",
+    feedback: "反馈",
     refresh: "刷新",
     usage: "用量",
     aiService: "AI 服务",
@@ -114,6 +119,8 @@ const I18N = {
     overview: "Overview",
     settings: "Settings",
     preferences: "Preferences",
+    repository: "GitHub",
+    feedback: "Feedback",
     refresh: "Refresh",
     usage: "usage",
     aiService: "AI service",
@@ -178,6 +185,8 @@ const elements = {
   settingsView: document.getElementById("settingsView"),
   homeButton: document.getElementById("homeButton"),
   settingsButton: document.getElementById("settingsButton"),
+  repositoryLink: document.getElementById("repositoryLink"),
+  issueLink: document.getElementById("issueLink"),
   sidebarProviderSection: document.getElementById("sidebarProviderSection"),
   sidebarProviderLabel: document.getElementById("sidebarProviderLabel"),
   providerOptions: document.getElementById("providerOptions"),
@@ -384,6 +393,8 @@ function applyLanguage() {
   elements.primaryNav.setAttribute("aria-label", t("primaryNavigation"));
   elements.homeButton.textContent = t("overview");
   elements.settingsButton.textContent = t("settings");
+  elements.repositoryLink.textContent = t("repository");
+  elements.issueLink.textContent = t("feedback");
   elements.sidebarProviderSection.setAttribute("aria-label", t("aiService"));
   elements.sidebarProviderLabel.textContent = t("aiService");
   elements.providerOptions.setAttribute("aria-label", t("aiService"));
@@ -758,10 +769,19 @@ function startWindowDrag(event) {
   aiUsage.startWindowDrag().catch(() => {});
 }
 
+function openProjectLink(event, url) {
+  event.preventDefault();
+  aiUsage.openExternal(url).catch(() => {
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+}
+
 document.addEventListener("pointerdown", startWindowDrag, true);
 elements.refreshButton.addEventListener("click", refreshStats);
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));
+elements.repositoryLink.addEventListener("click", (event) => openProjectLink(event, REPOSITORY_URL));
+elements.issueLink.addEventListener("click", (event) => openProjectLink(event, ISSUE_URL));
 elements.chooseCodexHomeButton.addEventListener("click", () => chooseHome("codex"));
 elements.chooseClaudeHomeButton.addEventListener("click", () => chooseHome("claude"));
 for (const button of elements.providerButtons) {

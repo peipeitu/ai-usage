@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { readClaudeStats } = require("./claudeStats");
 const { readCodexStats } = require("./codexStats");
 const { createSettingsStore, normalizeSettings } = require("./settingsStore");
@@ -89,6 +89,17 @@ app.whenReady().then(() => {
 
   ipcMain.handle("usage:chooseHome", async (_event, provider) => {
     return chooseProviderHome(provider === "claude" ? "claude" : "codex");
+  });
+
+  ipcMain.handle("app:openExternal", async (_event, url) => {
+    const allowedUrls = new Set([
+      "https://github.com/peipeitu/ai-usage",
+      "https://github.com/peipeitu/ai-usage/issues"
+    ]);
+    if (!allowedUrls.has(url)) {
+      throw new Error("URL is not allowed");
+    }
+    return shell.openExternal(url);
   });
 
   createWindow();

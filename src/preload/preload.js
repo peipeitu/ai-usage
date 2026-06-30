@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld("aiUsage", {
   getStats: (provider) => ipcRenderer.invoke("usage:getStats", provider),
   chooseHome: (provider) => ipcRenderer.invoke("usage:chooseHome", provider),
   getSettings: () => ipcRenderer.invoke("settings:get"),
-  updateSettings: (settings) => ipcRenderer.invoke("settings:update", settings)
+  updateSettings: (settings) => ipcRenderer.invoke("settings:update", settings),
+  openExternal: (url) => ipcRenderer.invoke("app:openExternal", url)
 });
