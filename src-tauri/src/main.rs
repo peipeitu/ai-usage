@@ -22,6 +22,8 @@ struct Settings {
   active_provider: String,
   codex_home: String,
   claude_home: String,
+  #[serde(default = "default_language")]
+  language: String,
   theme: String,
   accent_color: String,
   chart_days: u32,
@@ -183,14 +185,20 @@ fn default_settings() -> Settings {
     active_provider: "codex".to_string(),
     codex_home: String::new(),
     claude_home: String::new(),
+    language: default_language(),
     theme: "system".to_string(),
     accent_color: "blue".to_string(),
     chart_days: DEFAULT_CHART_DAYS,
   }
 }
 
+fn default_language() -> String {
+  "auto".to_string()
+}
+
 fn normalize_settings(settings: Settings) -> Settings {
   let providers = ["codex", "claude"];
+  let languages = ["auto", "zh", "en"];
   let themes = ["system", "light", "dark"];
   let accents = ["blue", "turquoise", "green", "purple", "red", "orange", "graphite"];
 
@@ -202,6 +210,11 @@ fn normalize_settings(settings: Settings) -> Settings {
     },
     codex_home: settings.codex_home,
     claude_home: settings.claude_home,
+    language: if languages.contains(&settings.language.as_str()) {
+      settings.language
+    } else {
+      default_language()
+    },
     theme: if themes.contains(&settings.theme.as_str()) {
       settings.theme
     } else {

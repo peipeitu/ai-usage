@@ -15,18 +15,18 @@
           </div>
           <div>
             <strong>AI Usage</strong>
-            <span>Usage monitor</span>
+            <span id="brandSubtitle">Usage monitor</span>
           </div>
         </div>
 
-        <nav class="sidebar-nav" aria-label="Primary navigation">
+        <nav id="primaryNav" class="sidebar-nav" aria-label="Primary navigation">
           <button id="homeButton" class="nav-button primary active" type="button">概览</button>
           <button id="settingsButton" class="nav-button" type="button">设置</button>
         </nav>
 
-        <section class="sidebar-provider" aria-label="AI 服务">
-          <span>AI 服务</span>
-          <div class="provider-options compact" role="radiogroup" aria-label="AI 服务">
+        <section id="sidebarProviderSection" class="sidebar-provider" aria-label="AI 服务">
+          <span id="sidebarProviderLabel">AI 服务</span>
+          <div id="providerOptions" class="provider-options compact" role="radiogroup" aria-label="AI 服务">
             <button class="provider-option active" type="button" data-provider="codex" aria-checked="true">
               <span>Codex</span>
             </button>
@@ -36,8 +36,8 @@
           </div>
         </section>
 
-        <section class="sidebar-usage" aria-label="Period usage">
-          <span>剩余用量</span>
+        <section id="sidebarUsageSection" class="sidebar-usage" aria-label="Period usage">
+          <span id="sidebarUsageLabel">剩余用量</span>
           <strong id="sidebarRemainingUsage">-</strong>
           <small id="sidebarPeriodMeta">近 30 天</small>
         </section>
@@ -66,15 +66,15 @@
 
         <section id="homeView">
           <div class="overview-meta">
-            <span>数据源</span>
+            <span id="overviewSourceLabel">数据源</span>
             <strong id="overviewProvider">Codex</strong>
             <span id="overviewPeriod">近 30 天</span>
-            <span>本地日志估算</span>
+            <span id="overviewEstimateLabel">本地日志估算</span>
           </div>
 
           <section class="hero-metrics" aria-label="Featured usage summary">
             <article class="hero-metric">
-              <span>今日费用</span>
+              <span id="todayCostLabel">今日费用</span>
               <strong id="todayCost">-</strong>
             </article>
             <article class="hero-metric">
@@ -87,26 +87,26 @@
               <strong id="periodTokens">-</strong>
             </article>
             <article class="hero-metric">
-              <span>最近 token 用量</span>
+              <span id="latestTokenUsageLabel">最近 token 用量</span>
               <strong id="latestTokenUsage">-</strong>
             </article>
           </section>
 
           <section class="summary-grid" aria-label="Usage summary">
             <article class="metric">
-              <span>总会话</span>
+              <span id="threadsTotalLabel">总会话</span>
               <strong id="threadsTotal">-</strong>
             </article>
             <article class="metric">
-              <span>活跃</span>
+              <span id="threadsActiveLabel">活跃</span>
               <strong id="threadsActive">-</strong>
             </article>
             <article class="metric">
-              <span>总 token</span>
+              <span id="tokensTotalLabel">总 token</span>
               <strong id="tokensTotal">-</strong>
             </article>
             <article class="metric">
-              <span>近 7 天更新</span>
+              <span id="updatedThisWeekLabel">近 7 天更新</span>
               <strong id="updatedThisWeek">-</strong>
             </article>
           </section>
@@ -125,7 +125,7 @@
 
             <article class="panel">
               <div class="panel-heading">
-                <h2>剩余用量</h2>
+                <h2 id="rateLimitTitle">剩余用量</h2>
                 <span id="rateLimitUpdated">-</span>
               </div>
               <div id="rateLimitList" class="limit-list"></div>
@@ -133,28 +133,28 @@
 
             <article class="panel">
               <div class="panel-heading">
-                <h2>模型</h2>
+                <h2 id="modelTitle">模型</h2>
               </div>
               <div id="modelList" class="rank-list"></div>
             </article>
 
             <article class="panel">
               <div class="panel-heading">
-                <h2>运行来源</h2>
+                <h2 id="sourceTitle">运行来源</h2>
               </div>
               <div id="sourceList" class="rank-list"></div>
             </article>
 
             <article class="panel wide">
               <div class="panel-heading">
-                <h2>工作区</h2>
+                <h2 id="workspaceTitle">工作区</h2>
               </div>
               <div id="workspaceList" class="rank-list columns"></div>
             </article>
 
             <article class="panel wide recent-panel">
               <div class="panel-heading">
-                <h2>最近会话</h2>
+                <h2 id="recentThreadsTitle">最近会话</h2>
               </div>
               <div id="recentThreads" class="thread-list"></div>
             </article>
@@ -164,13 +164,13 @@
         <section id="settingsView" class="settings-view" hidden>
           <article class="panel wide settings-panel">
             <div class="panel-heading">
-              <h2>设置</h2>
+              <h2 id="settingsPanelTitle">设置</h2>
               <span id="settingsStatus">-</span>
             </div>
 
             <div class="settings-list">
               <label class="setting-row">
-                <span>Codex 数据目录</span>
+                <span id="codexHomeLabel">Codex 数据目录</span>
                 <div class="setting-control folder-control">
                   <code id="codexHomeValue">-</code>
                   <button id="chooseCodexHomeButton" class="secondary-button" type="button">选择目录</button>
@@ -178,7 +178,7 @@
               </label>
 
               <label class="setting-row">
-                <span>Claude Code 数据目录</span>
+                <span id="claudeHomeLabel">Claude Code 数据目录</span>
                 <div class="setting-control folder-control">
                   <code id="claudeHomeValue">-</code>
                   <button id="chooseClaudeHomeButton" class="secondary-button" type="button">选择目录</button>
@@ -186,17 +186,26 @@
               </label>
 
               <label class="setting-row">
-                <span>主题</span>
-                <select id="themeSelect">
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
+                <span id="languageLabel">语言</span>
+                <select id="languageSelect">
+                  <option id="languageAutoOption" value="auto">跟随系统</option>
+                  <option id="languageZhOption" value="zh">中文</option>
+                  <option id="languageEnOption" value="en">English</option>
                 </select>
               </label>
 
               <label class="setting-row">
-                <span>主题色</span>
-                <div class="accent-options" role="radiogroup" aria-label="主题色">
+                <span id="themeLabel">主题</span>
+                <select id="themeSelect">
+                  <option id="themeSystemOption" value="system">跟随系统</option>
+                  <option id="themeLightOption" value="light">浅色</option>
+                  <option id="themeDarkOption" value="dark">深色</option>
+                </select>
+              </label>
+
+              <label class="setting-row">
+                <span id="accentLabel">主题色</span>
+                <div id="accentOptions" class="accent-options" role="radiogroup" aria-label="主题色">
                   <button class="swatch" type="button" data-accent="blue" aria-label="Blue"></button>
                   <button class="swatch" type="button" data-accent="turquoise" aria-label="Turquoise"></button>
                   <button class="swatch" type="button" data-accent="green" aria-label="Green"></button>
@@ -208,16 +217,16 @@
               </label>
 
               <label class="setting-row">
-                <span>图表周期</span>
+                <span id="chartPeriodLabel">图表周期</span>
                 <div class="period-control">
-                  <div class="period-presets" aria-label="图表周期快捷选择">
-                    <button type="button" data-days="7">一周</button>
-                    <button type="button" data-days="30">一个月</button>
-                    <button type="button" data-days="90">三个月</button>
+                  <div id="periodPresets" class="period-presets" aria-label="图表周期快捷选择">
+                    <button id="period7Button" type="button" data-days="7">一周</button>
+                    <button id="period30Button" type="button" data-days="30">一个月</button>
+                    <button id="period90Button" type="button" data-days="90">三个月</button>
                   </div>
                   <label class="days-input">
                     <input id="chartDaysInput" type="number" min="7" max="365" step="1" />
-                    <span>天</span>
+                    <span id="daysSuffix">天</span>
                   </label>
                 </div>
               </label>

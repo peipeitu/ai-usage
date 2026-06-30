@@ -1,11 +1,3 @@
-const currencyFormatter = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2
-});
-const wholeFormatter = new Intl.NumberFormat(undefined, {
-  maximumFractionDigits: 0
-});
-
 const tauriCore = window.__TAURI__?.core;
 const aiUsage = window.aiUsage || {
   platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
@@ -21,32 +13,165 @@ let currentSettings = {
   activeProvider: "codex",
   codexHome: "",
   claudeHome: "",
+  language: "auto",
   theme: "system",
   accentColor: "blue",
   chartDays: 30
 };
 let currentView = "home";
+let lastStats = null;
 
 const PROVIDERS = {
   codex: {
     label: "Codex",
-    usageLabel: "Codex usage",
     initials: "CD",
     defaultHome: "~/.codex"
   },
   claude: {
     label: "Claude Code",
-    usageLabel: "Claude Code usage",
     initials: "CC",
     defaultHome: "~/.claude"
   }
 };
 
+const I18N = {
+  zh: {
+    brandSubtitle: "用量监控",
+    primaryNavigation: "主导航",
+    overview: "概览",
+    settings: "设置",
+    preferences: "偏好设置",
+    refresh: "刷新",
+    usage: "用量",
+    aiService: "AI 服务",
+    remainingUsage: "剩余用量",
+    periodUsage: "周期用量",
+    dataSource: "数据源",
+    localEstimate: "本地日志估算",
+    todayCost: "今日费用",
+    periodCost: "近 {days} 天费用",
+    periodTokens: "近 {days} 天 token 用量",
+    latestTokenUsage: "最近 token 用量",
+    threadsTotal: "总会话",
+    threadsActive: "活跃",
+    tokensTotal: "总 token",
+    updatedThisWeek: "近 7 天更新",
+    activityTrend: "近 {days} 天趋势",
+    models: "模型",
+    sources: "运行来源",
+    workspaces: "工作区",
+    recentThreads: "最近会话",
+    settingsSaved: "已保存",
+    codexHome: "Codex 数据目录",
+    claudeHome: "Claude Code 数据目录",
+    chooseFolder: "选择目录",
+    language: "语言",
+    followSystem: "跟随系统",
+    chinese: "中文",
+    english: "English",
+    theme: "主题",
+    light: "浅色",
+    dark: "深色",
+    accentColor: "主题色",
+    chartPeriod: "图表周期",
+    chartPeriodPresets: "图表周期快捷选择",
+    oneWeek: "一周",
+    oneMonth: "一个月",
+    threeMonths: "三个月",
+    daysSuffix: "天",
+    daysPeriod: "近 {days} 天",
+    emptyData: "暂无数据",
+    emptyRateLimits: "暂无剩余用量数据",
+    emptyRecentThreads: "暂无最近会话",
+    updatedAt: "更新于 {date}",
+    percentUsage: "{percent}% {plan} 使用量",
+    usageEstimated: "按本地日志估算",
+    resetAt: "{label} · {time} 重置",
+    waitingForLogs: "等待 {provider} 日志",
+    readStatsError: "无法读取 {provider} 统计",
+    switchHomeError: "无法切换 {provider} 目录",
+    tokens: "tokens",
+    subtask: "子任务",
+    unknown: "Unknown",
+    untitled: "Untitled"
+  },
+  en: {
+    brandSubtitle: "Usage monitor",
+    primaryNavigation: "Primary navigation",
+    overview: "Overview",
+    settings: "Settings",
+    preferences: "Preferences",
+    refresh: "Refresh",
+    usage: "usage",
+    aiService: "AI service",
+    remainingUsage: "Remaining usage",
+    periodUsage: "Period usage",
+    dataSource: "Data source",
+    localEstimate: "Local log estimate",
+    todayCost: "Today cost",
+    periodCost: "{days}-day cost",
+    periodTokens: "{days}-day token usage",
+    latestTokenUsage: "Latest token usage",
+    threadsTotal: "Total threads",
+    threadsActive: "Active",
+    tokensTotal: "Total tokens",
+    updatedThisWeek: "Updated in 7 days",
+    activityTrend: "{days}-day trend",
+    models: "Models",
+    sources: "Sources",
+    workspaces: "Workspaces",
+    recentThreads: "Recent threads",
+    settingsSaved: "Saved",
+    codexHome: "Codex data folder",
+    claudeHome: "Claude Code data folder",
+    chooseFolder: "Choose folder",
+    language: "Language",
+    followSystem: "Follow system",
+    chinese: "中文",
+    english: "English",
+    theme: "Theme",
+    light: "Light",
+    dark: "Dark",
+    accentColor: "Accent color",
+    chartPeriod: "Chart period",
+    chartPeriodPresets: "Chart period presets",
+    oneWeek: "1 week",
+    oneMonth: "1 month",
+    threeMonths: "3 months",
+    daysSuffix: "days",
+    daysPeriod: "Last {days} days",
+    emptyData: "No data",
+    emptyRateLimits: "No remaining usage data",
+    emptyRecentThreads: "No recent threads",
+    updatedAt: "Updated {date}",
+    percentUsage: "{percent}% {plan} usage",
+    usageEstimated: "Estimated from local logs",
+    resetAt: "{label} · resets {time}",
+    waitingForLogs: "Waiting for {provider} logs",
+    readStatsError: "Unable to read {provider} stats",
+    switchHomeError: "Unable to switch {provider} folder",
+    tokens: "tokens",
+    subtask: "Subtask",
+    unknown: "Unknown",
+    untitled: "Untitled"
+  }
+};
+
 const elements = {
+  documentTitle: document.querySelector("title"),
+  brandSubtitle: document.getElementById("brandSubtitle"),
+  primaryNav: document.getElementById("primaryNav"),
   homeView: document.getElementById("homeView"),
   settingsView: document.getElementById("settingsView"),
   homeButton: document.getElementById("homeButton"),
   settingsButton: document.getElementById("settingsButton"),
+  sidebarProviderSection: document.getElementById("sidebarProviderSection"),
+  sidebarProviderLabel: document.getElementById("sidebarProviderLabel"),
+  providerOptions: document.getElementById("providerOptions"),
+  sidebarUsageSection: document.getElementById("sidebarUsageSection"),
+  sidebarUsageLabel: document.getElementById("sidebarUsageLabel"),
+  overviewSourceLabel: document.getElementById("overviewSourceLabel"),
+  overviewEstimateLabel: document.getElementById("overviewEstimateLabel"),
   overviewPeriod: document.getElementById("overviewPeriod"),
   sidebarRemainingUsage: document.getElementById("sidebarRemainingUsage"),
   sidebarPeriodMeta: document.getElementById("sidebarPeriodMeta"),
@@ -62,15 +187,26 @@ const elements = {
   periodUsagePercent: document.getElementById("periodUsagePercent"),
   periodTokens: document.getElementById("periodTokens"),
   latestTokenUsage: document.getElementById("latestTokenUsage"),
+  todayCostLabel: document.getElementById("todayCostLabel"),
   periodCostLabel: document.getElementById("periodCostLabel"),
   periodTokensLabel: document.getElementById("periodTokensLabel"),
+  latestTokenUsageLabel: document.getElementById("latestTokenUsageLabel"),
   activityTitle: document.getElementById("activityTitle"),
+  threadsTotalLabel: document.getElementById("threadsTotalLabel"),
+  threadsActiveLabel: document.getElementById("threadsActiveLabel"),
+  tokensTotalLabel: document.getElementById("tokensTotalLabel"),
+  updatedThisWeekLabel: document.getElementById("updatedThisWeekLabel"),
   threadsTotal: document.getElementById("threadsTotal"),
   threadsActive: document.getElementById("threadsActive"),
   tokensTotal: document.getElementById("tokensTotal"),
   updatedThisWeek: document.getElementById("updatedThisWeek"),
   lastUpdated: document.getElementById("lastUpdated"),
   rateLimitUpdated: document.getElementById("rateLimitUpdated"),
+  rateLimitTitle: document.getElementById("rateLimitTitle"),
+  modelTitle: document.getElementById("modelTitle"),
+  sourceTitle: document.getElementById("sourceTitle"),
+  workspaceTitle: document.getElementById("workspaceTitle"),
+  recentThreadsTitle: document.getElementById("recentThreadsTitle"),
   dailyChart: document.getElementById("dailyChart"),
   chartTooltip: document.getElementById("chartTooltip"),
   rateLimitList: document.getElementById("rateLimitList"),
@@ -83,6 +219,26 @@ const elements = {
   chooseClaudeHomeButton: document.getElementById("chooseClaudeHomeButton"),
   codexHomeValue: document.getElementById("codexHomeValue"),
   claudeHomeValue: document.getElementById("claudeHomeValue"),
+  settingsPanelTitle: document.getElementById("settingsPanelTitle"),
+  codexHomeLabel: document.getElementById("codexHomeLabel"),
+  claudeHomeLabel: document.getElementById("claudeHomeLabel"),
+  languageLabel: document.getElementById("languageLabel"),
+  languageSelect: document.getElementById("languageSelect"),
+  languageAutoOption: document.getElementById("languageAutoOption"),
+  languageZhOption: document.getElementById("languageZhOption"),
+  languageEnOption: document.getElementById("languageEnOption"),
+  themeLabel: document.getElementById("themeLabel"),
+  themeSystemOption: document.getElementById("themeSystemOption"),
+  themeLightOption: document.getElementById("themeLightOption"),
+  themeDarkOption: document.getElementById("themeDarkOption"),
+  accentLabel: document.getElementById("accentLabel"),
+  accentOptions: document.getElementById("accentOptions"),
+  chartPeriodLabel: document.getElementById("chartPeriodLabel"),
+  periodPresets: document.getElementById("periodPresets"),
+  period7Button: document.getElementById("period7Button"),
+  period30Button: document.getElementById("period30Button"),
+  period90Button: document.getElementById("period90Button"),
+  daysSuffix: document.getElementById("daysSuffix"),
   providerButtons: Array.from(document.querySelectorAll("[data-provider]")),
   themeSelect: document.getElementById("themeSelect"),
   accentButtons: Array.from(document.querySelectorAll("[data-accent]")),
@@ -91,8 +247,31 @@ const elements = {
   settingsStatus: document.getElementById("settingsStatus")
 };
 
+function systemLanguage() {
+  const language = [navigator.language, ...(navigator.languages || [])].filter(Boolean).find(Boolean) || "en";
+  return language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function currentLanguage() {
+  return currentSettings.language === "zh" || currentSettings.language === "en"
+    ? currentSettings.language
+    : systemLanguage();
+}
+
+function localeForLanguage() {
+  return currentLanguage() === "zh" ? "zh-CN" : "en-US";
+}
+
+function t(key, values = {}) {
+  const dictionary = I18N[currentLanguage()] || I18N.en;
+  const template = dictionary[key] || I18N.en[key] || key;
+  return template.replace(/\{(\w+)\}/g, (_, name) => values[name] ?? "");
+}
+
 function formatNumber(value) {
-  return wholeFormatter.format(value || 0);
+  return new Intl.NumberFormat(localeForLanguage(), {
+    maximumFractionDigits: 0
+  }).format(value || 0);
 }
 
 function formatCompact(value) {
@@ -115,7 +294,10 @@ function formatCompact(value) {
 }
 
 function formatCurrency(value) {
-  return `$${currencyFormatter.format(value || 0)}`;
+  return `$${new Intl.NumberFormat(localeForLanguage(), {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value || 0)}`;
 }
 
 function formatPercent(value) {
@@ -128,13 +310,13 @@ function formatResetTime(limit) {
   if (Number.isNaN(resetDate.getTime())) return "-";
 
   if (Number(limit.windowMinutes) <= 24 * 60) {
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat(localeForLanguage(), {
       hour: "2-digit",
       minute: "2-digit"
     }).format(resetDate);
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(localeForLanguage(), {
     month: "short",
     day: "numeric"
   }).format(resetDate);
@@ -144,14 +326,96 @@ function primaryRateLimit(stats) {
   return stats.rateLimits?.windows?.[0] || null;
 }
 
+function formatLimitLabel(limit) {
+  const minutes = Number(limit?.windowMinutes) || 0;
+  if (minutes === 300) return currentLanguage() === "zh" ? "5 小时" : "5 hours";
+  if (minutes === 10080) return currentLanguage() === "zh" ? "1 周" : "1 week";
+  if (minutes >= 10080 && minutes % 10080 === 0) {
+    const weeks = minutes / 10080;
+    return currentLanguage() === "zh" ? `${weeks} 周` : `${weeks} weeks`;
+  }
+  if (minutes >= 1440 && minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return currentLanguage() === "zh" ? `${days} 天` : `${days} days`;
+  }
+  if (minutes >= 60 && minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return currentLanguage() === "zh" ? `${hours} 小时` : `${hours} hours`;
+  }
+  return currentLanguage() === "zh" ? `${minutes} 分钟` : `${minutes} minutes`;
+}
+
+function displaySourceName(name) {
+  if (name === "子任务" || name === "Subtask") return t("subtask");
+  if (!name || name === "Unknown") return t("unknown");
+  return name;
+}
+
 function formatDate(value) {
   if (!value) return "-";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(localeForLanguage(), {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function applyLanguage() {
+  const lang = currentLanguage();
+  const chartDays = currentSettings.chartDays || 30;
+
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  elements.documentTitle.textContent = "AI Usage";
+  elements.brandSubtitle.textContent = t("brandSubtitle");
+  elements.primaryNav.setAttribute("aria-label", t("primaryNavigation"));
+  elements.homeButton.textContent = t("overview");
+  elements.settingsButton.textContent = t("settings");
+  elements.sidebarProviderSection.setAttribute("aria-label", t("aiService"));
+  elements.sidebarProviderLabel.textContent = t("aiService");
+  elements.providerOptions.setAttribute("aria-label", t("aiService"));
+  elements.sidebarUsageSection.setAttribute("aria-label", t("periodUsage"));
+  elements.sidebarUsageLabel.textContent = t("remainingUsage");
+  elements.refreshButton.setAttribute("aria-label", t("refresh"));
+  elements.refreshButton.setAttribute("title", t("refresh"));
+  elements.overviewSourceLabel.textContent = t("dataSource");
+  elements.overviewEstimateLabel.textContent = t("localEstimate");
+  elements.todayCostLabel.textContent = t("todayCost");
+  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.latestTokenUsageLabel.textContent = t("latestTokenUsage");
+  elements.threadsTotalLabel.textContent = t("threadsTotal");
+  elements.threadsActiveLabel.textContent = t("threadsActive");
+  elements.tokensTotalLabel.textContent = t("tokensTotal");
+  elements.updatedThisWeekLabel.textContent = t("updatedThisWeek");
+  elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
+  elements.rateLimitTitle.textContent = t("remainingUsage");
+  elements.modelTitle.textContent = t("models");
+  elements.sourceTitle.textContent = t("sources");
+  elements.workspaceTitle.textContent = t("workspaces");
+  elements.recentThreadsTitle.textContent = t("recentThreads");
+  elements.settingsPanelTitle.textContent = t("settings");
+  elements.codexHomeLabel.textContent = t("codexHome");
+  elements.claudeHomeLabel.textContent = t("claudeHome");
+  elements.chooseCodexHomeButton.textContent = t("chooseFolder");
+  elements.chooseClaudeHomeButton.textContent = t("chooseFolder");
+  elements.languageLabel.textContent = t("language");
+  elements.languageAutoOption.textContent = t("followSystem");
+  elements.languageZhOption.textContent = t("chinese");
+  elements.languageEnOption.textContent = t("english");
+  elements.themeLabel.textContent = t("theme");
+  elements.themeSystemOption.textContent = t("followSystem");
+  elements.themeLightOption.textContent = t("light");
+  elements.themeDarkOption.textContent = t("dark");
+  elements.accentLabel.textContent = t("accentColor");
+  elements.accentOptions.setAttribute("aria-label", t("accentColor"));
+  elements.chartPeriodLabel.textContent = t("chartPeriod");
+  elements.periodPresets.setAttribute("aria-label", t("chartPeriodPresets"));
+  elements.period7Button.textContent = t("oneWeek");
+  elements.period30Button.textContent = t("oneMonth");
+  elements.period90Button.textContent = t("threeMonths");
+  elements.daysSuffix.textContent = t("daysSuffix");
+  setView(currentView);
 }
 
 function applyTheme(theme) {
@@ -178,8 +442,8 @@ function setView(view) {
   elements.refreshButton.hidden = isSettings;
   elements.homeButton.classList.toggle("active", !isSettings);
   elements.settingsButton.classList.toggle("active", isSettings);
-  elements.viewEyebrow.textContent = isSettings ? "Preferences" : provider.usageLabel;
-  elements.viewTitle.textContent = isSettings ? "设置" : "概览";
+  elements.viewEyebrow.textContent = isSettings ? t("preferences") : `${provider.label} ${t("usage")}`;
+  elements.viewTitle.textContent = isSettings ? t("settings") : t("overview");
 }
 
 function setLoading(isLoading) {
@@ -195,6 +459,7 @@ function renderError(message) {
 }
 
 function renderSettings() {
+  currentSettings.language = currentSettings.language || "auto";
   elements.codexHomeValue.textContent = currentSettings.codexHome || PROVIDERS.codex.defaultHome;
   elements.claudeHomeValue.textContent = currentSettings.claudeHome || PROVIDERS.claude.defaultHome;
   for (const button of elements.providerButtons) {
@@ -202,17 +467,18 @@ function renderSettings() {
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-checked", String(isActive));
   }
+  elements.languageSelect.value = currentSettings.language;
   elements.themeSelect.value = currentSettings.theme;
   applyAccent(currentSettings.accentColor);
   elements.chartDaysInput.value = currentSettings.chartDays;
-  elements.overviewPeriod.textContent = `近 ${currentSettings.chartDays} 天`;
-  elements.sidebarPeriodMeta.textContent = `近 ${currentSettings.chartDays} 天`;
+  elements.overviewPeriod.textContent = t("daysPeriod", { days: currentSettings.chartDays });
+  elements.sidebarPeriodMeta.textContent = t("daysPeriod", { days: currentSettings.chartDays });
   for (const button of elements.periodButtons) {
     button.classList.toggle("active", Number(button.dataset.days) === Number(currentSettings.chartDays));
   }
-  elements.settingsStatus.textContent = "已保存";
+  elements.settingsStatus.textContent = t("settingsSaved");
   applyTheme(currentSettings.theme);
-  setView(currentView);
+  applyLanguage();
 }
 
 function renderRankList(container, items, options = {}) {
@@ -221,7 +487,7 @@ function renderRankList(container, items, options = {}) {
   if (!items.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无数据";
+    empty.textContent = t("emptyData");
     container.append(empty);
     return;
   }
@@ -234,7 +500,7 @@ function renderRankList(container, items, options = {}) {
 
     const label = document.createElement("span");
     label.className = "rank-label";
-    label.textContent = item.name;
+    label.textContent = options.formatName ? options.formatName(item.name) : item.name;
 
     const value = document.createElement("span");
     value.className = "rank-value";
@@ -255,20 +521,22 @@ function renderRateLimits(rateLimits) {
   if (!rateLimits?.windows?.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无剩余用量数据";
+    empty.textContent = t("emptyRateLimits");
     elements.rateLimitList.append(empty);
     elements.rateLimitUpdated.textContent = "-";
     return;
   }
 
-  elements.rateLimitUpdated.textContent = rateLimits.updatedAt ? `更新于 ${formatDate(rateLimits.updatedAt)}` : "-";
+  elements.rateLimitUpdated.textContent = rateLimits.updatedAt
+    ? t("updatedAt", { date: formatDate(rateLimits.updatedAt) })
+    : "-";
 
   for (const limit of rateLimits.windows) {
     const row = document.createElement("div");
     row.className = "limit-row";
 
     const label = document.createElement("strong");
-    label.textContent = limit.label;
+    label.textContent = formatLimitLabel(limit);
 
     const remaining = document.createElement("span");
     remaining.textContent = formatPercent(limit.remainingPercent);
@@ -306,7 +574,7 @@ function renderDailyChart(days) {
       bar.dataset.level = "low";
     }
     bar.style.height = `${Math.max(8, (Math.max(day.tokens, day.threads) / max) * 100)}%`;
-    bar.setAttribute("aria-label", `${day.date}: ${formatCompact(day.tokens)} tokens`);
+    bar.setAttribute("aria-label", `${day.date}: ${formatCompact(day.tokens)} ${t("tokens")}`);
     bar.addEventListener("mouseenter", (event) => {
       bar.classList.add("active");
       showChartTooltip(event, day);
@@ -325,7 +593,7 @@ function renderDailyChart(days) {
 function showChartTooltip(event, day) {
   elements.chartTooltip.innerHTML = `
     <strong>${day.date}</strong>
-    <span>${formatCompact(day.tokens)} tokens</span>
+    <span>${formatCompact(day.tokens)} ${t("tokens")}</span>
     <span>${formatCurrency(day.cost)}</span>
   `;
   elements.chartTooltip.hidden = false;
@@ -350,7 +618,7 @@ function renderRecentThreads(threads) {
   if (!threads.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "暂无最近会话";
+    empty.textContent = t("emptyRecentThreads");
     elements.recentThreads.append(empty);
     return;
   }
@@ -361,9 +629,9 @@ function renderRecentThreads(threads) {
 
     const main = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = thread.title;
+    title.textContent = thread.title || t("untitled");
     const meta = document.createElement("span");
-    meta.textContent = `${thread.model} · ${thread.source} · ${formatDate(thread.updatedAt)}`;
+    meta.textContent = `${thread.model} · ${displaySourceName(thread.source)} · ${formatDate(thread.updatedAt)}`;
     main.append(title, meta);
 
     const tokens = document.createElement("span");
@@ -376,25 +644,29 @@ function renderRecentThreads(threads) {
 }
 
 function renderStats(stats) {
+  lastStats = stats;
   const chartDays = stats.settings?.chartDays || currentSettings.chartDays;
   const mainLimit = primaryRateLimit(stats);
   const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
   renderError(stats.error);
 
   elements.overviewProvider.textContent = provider.label;
-  elements.periodCostLabel.textContent = `近 ${chartDays} 天费用`;
-  elements.periodTokensLabel.textContent = `近 ${chartDays} 天 token 用量`;
-  elements.activityTitle.textContent = `近 ${chartDays} 天趋势`;
-  elements.overviewPeriod.textContent = `近 ${chartDays} 天`;
+  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
+  elements.overviewPeriod.textContent = t("daysPeriod", { days: chartDays });
   elements.todayCost.textContent = formatCurrency(stats.featured.todayCost);
   elements.periodCost.textContent = formatCurrency(stats.featured.periodCost);
   elements.periodUsagePercent.textContent = Number.isFinite(stats.featured.periodUsagePercent)
-    ? `${Math.round(stats.featured.periodUsagePercent)}% ${stats.account?.planLabel || ""} 使用量`
-    : "按本地日志估算";
+    ? t("percentUsage", {
+        percent: Math.round(stats.featured.periodUsagePercent),
+        plan: stats.account?.planLabel || ""
+      })
+    : t("usageEstimated");
   elements.sidebarRemainingUsage.textContent = mainLimit ? formatPercent(mainLimit.remainingPercent) : "-";
   elements.sidebarPeriodMeta.textContent = mainLimit
-    ? `${mainLimit.label} · ${formatResetTime(mainLimit)} 重置`
-    : `等待 ${provider.label} 日志`;
+    ? t("resetAt", { label: formatLimitLabel(mainLimit), time: formatResetTime(mainLimit) })
+    : t("waitingForLogs", { provider: provider.label });
   elements.periodTokens.textContent = formatCompact(stats.featured.periodTokens);
   elements.latestTokenUsage.textContent = formatCompact(stats.featured.latestTokenUsage);
 
@@ -402,7 +674,7 @@ function renderStats(stats) {
   elements.threadsActive.textContent = formatCompact(stats.totals.activeThreads);
   elements.tokensTotal.textContent = formatCompact(stats.totals.totalTokens);
   elements.updatedThisWeek.textContent = formatCompact(stats.totals.updatedThisWeek);
-  elements.lastUpdated.textContent = `更新于 ${formatDate(stats.generatedAt)}`;
+  elements.lastUpdated.textContent = t("updatedAt", { date: formatDate(stats.generatedAt) });
   elements.accountInitials.textContent = stats.account?.initials || provider.initials;
   elements.accountName.textContent = stats.account?.displayName || provider.label;
   elements.accountPlan.textContent = stats.account?.planLabel || provider.label;
@@ -410,7 +682,7 @@ function renderStats(stats) {
   renderDailyChart(stats.dailySeries);
   renderRateLimits(stats.rateLimits);
   renderRankList(elements.modelList, stats.models, { compact: true });
-  renderRankList(elements.sourceList, stats.sources);
+  renderRankList(elements.sourceList, stats.sources, { formatName: displaySourceName });
   renderRankList(elements.workspaceList, stats.workspaces, { compact: true });
   renderRecentThreads(stats.latestThreads);
 }
@@ -422,18 +694,22 @@ async function refreshStats() {
     renderStats(stats);
   } catch (error) {
     const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
-    renderError(error.message || `无法读取 ${provider.label} 统计`);
+    renderError(error.message || t("readStatsError", { provider: provider.label }));
   } finally {
     setLoading(false);
   }
 }
 
 async function saveSettings(nextSettings, shouldRefresh = true) {
+  const languageChanged = Object.prototype.hasOwnProperty.call(nextSettings, "language");
   currentSettings = await aiUsage.updateSettings({
     ...currentSettings,
     ...nextSettings
   });
   renderSettings();
+  if (languageChanged && lastStats) {
+    renderStats(lastStats);
+  }
   if (shouldRefresh) {
     await refreshStats();
   }
@@ -450,7 +726,7 @@ async function chooseHome(providerId) {
     }
   } catch (error) {
     const provider = PROVIDERS[providerId] || PROVIDERS.codex;
-    renderError(error.message || `无法切换 ${provider.label} 目录`);
+    renderError(error.message || t("switchHomeError", { provider: provider.label }));
   } finally {
     setLoading(false);
   }
@@ -469,6 +745,9 @@ for (const button of elements.providerButtons) {
 elements.themeSelect.addEventListener("change", async () => {
   await saveSettings({ theme: elements.themeSelect.value }, false);
 });
+elements.languageSelect.addEventListener("change", async () => {
+  await saveSettings({ language: elements.languageSelect.value }, false);
+});
 for (const button of elements.accentButtons) {
   button.addEventListener("click", async () => {
     await saveSettings({ accentColor: button.dataset.accent }, false);
@@ -484,6 +763,13 @@ elements.chartDaysInput.addEventListener("change", async () => {
 });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   applyTheme(currentSettings.theme);
+});
+window.addEventListener("languagechange", () => {
+  if (currentSettings.language !== "auto") return;
+  renderSettings();
+  if (lastStats) {
+    renderStats(lastStats);
+  }
 });
 
 async function boot() {
