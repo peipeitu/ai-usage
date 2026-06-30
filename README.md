@@ -109,14 +109,14 @@ Outputs:
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.0_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.0_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.1_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.1_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.0_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.1_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.

@@ -271,15 +271,19 @@ fn update_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-fn get_stats(provider: Option<String>) -> Result<Stats, String> {
-  let settings = load_settings();
-  let provider = provider.unwrap_or_else(|| settings.active_provider.clone());
-  read_stats_for_provider(&settings, &provider)
+async fn get_stats(provider: Option<String>) -> Result<Stats, String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let settings = load_settings();
+    let provider = provider.unwrap_or_else(|| settings.active_provider.clone());
+    read_stats_for_provider(&settings, &provider)
+  })
+  .await
+  .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
-  let provider = if provider == "claude" { "claude" } else { "codex" };
+async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
+  let provider = if provider == "claude" { "claude" } else { "codex" }.to_string();
   let title = if provider == "claude" {
     "Select Claude Code data directory"
   } else {
@@ -290,18 +294,23 @@ fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
     return Ok(None);
   };
 
-  let mut settings = load_settings();
-  settings.active_provider = provider.to_string();
-  if provider == "claude" {
-    settings.claude_home = folder.to_string_lossy().to_string();
-  } else {
-    settings.codex_home = folder.to_string_lossy().to_string();
-  }
-  settings = normalize_settings(settings);
-  save_settings(&settings)?;
-  let stats = read_stats_for_provider(&settings, provider)?;
+  let folder = folder.to_string_lossy().to_string();
+  tauri::async_runtime::spawn_blocking(move || {
+    let mut settings = load_settings();
+    settings.active_provider = provider.clone();
+    if provider == "claude" {
+      settings.claude_home = folder;
+    } else {
+      settings.codex_home = folder;
+    }
+    settings = normalize_settings(settings);
+    save_settings(&settings)?;
+    let stats = read_stats_for_provider(&settings, &provider)?;
 
-  Ok(Some(ChooseHomeResult { settings, stats }))
+    Ok(Some(ChooseHomeResult { settings, stats }))
+  })
+  .await
+  .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1200,6 +1209,219 @@ fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
     false,
     paths,
   ))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::{
+    io::Write,
+    time::{SystemTime, UNIX_EPOCH},
+  };
+
+  fn test_account() -> Account {
+    Account {
+      display_name: "Codex".to_string(),
+      initials: "CD".to_string(),
+      plan_type: None,
+      plan_label: "Codex".to_string(),
+      plan_monthly_usd: None,
+    }
+  }
+
+  fn temp_jsonl_path(name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system time should be after unix epoch")
+      .as_nanos();
+    let dir = env::temp_dir().join(format!("ai-usage-test-{nonce}"));
+    fs::create_dir_all(&dir).expect("test temp dir should be created");
+    dir.join(name)
+  }
+
+  #[test]
+  fn source_label_normalizes_known_sources() {
+    assert_eq!(source_label(Some(r#"{"subagent":{"other":"guardian"}}"#)), "子任务");
+    assert_eq!(source_label(Some("vscode")), "VS Code");
+    assert_eq!(source_label(Some("")), "Unknown");
+    assert_eq!(source_label(None), "Unknown");
+  }
+
+  #[test]
+  fn usage_total_includes_claude_cache_and_output_tokens() {
+    let usage = json!({
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 20,
+      "cache_read_input_tokens": 30,
+      "output_tokens": 40
+    });
+
+    assert_eq!(usage_total(&usage), 100);
+  }
+
+  #[test]
+  fn build_stats_from_threads_aggregates_codex_usage_events() {
+    let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+      .unwrap()
+      .with_timezone(&Local);
+    let rate_limits = normalize_rate_limits(
+      Some(&json!({
+        "plan_type": "prolite",
+        "primary": { "used_percent": 8, "window_minutes": 300, "resets_at": 1782833640 },
+        "secondary": { "used_percent": 6, "window_minutes": 10080, "resets_at": 1783478400 }
+      })),
+      DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
+        .unwrap()
+        .timestamp_millis(),
+    );
+    let threads = vec![
+      Thread {
+        id: "one".to_string(),
+        title: "First".to_string(),
+        source: source_label(Some("vscode")),
+        model: "gpt-5.5".to_string(),
+        cwd: "/work/app-one".to_string(),
+        archived: false,
+        tokens_used: 1200,
+        created_at_ms: DateTime::parse_from_rfc3339("2026-06-29T10:00:00.000Z")
+          .unwrap()
+          .timestamp_millis(),
+        updated_at_ms: DateTime::parse_from_rfc3339("2026-06-30T09:00:00.000Z")
+          .unwrap()
+          .timestamp_millis(),
+        rollout_path: String::new(),
+        usage_events: vec![UsageEvent {
+          thread_id: "one".to_string(),
+          timestamp_ms: DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
+            .unwrap()
+            .timestamp_millis(),
+          model: "gpt-5.5".to_string(),
+          total_tokens: 1500,
+          plan_type: Some("prolite".to_string()),
+          rate_limits,
+        }],
+      },
+      Thread {
+        id: "two".to_string(),
+        title: "Second".to_string(),
+        source: source_label(Some(r#"{"subagent":{"other":"guardian"}}"#)),
+        model: "codex-auto-review".to_string(),
+        cwd: "/work/app-two".to_string(),
+        archived: true,
+        tokens_used: 300,
+        created_at_ms: DateTime::parse_from_rfc3339("2026-06-20T10:00:00.000Z")
+          .unwrap()
+          .timestamp_millis(),
+        updated_at_ms: DateTime::parse_from_rfc3339("2026-06-21T09:00:00.000Z")
+          .unwrap()
+          .timestamp_millis(),
+        rollout_path: String::new(),
+        usage_events: vec![UsageEvent {
+          thread_id: "two".to_string(),
+          timestamp_ms: DateTime::parse_from_rfc3339("2026-06-20T11:00:00.000Z")
+            .unwrap()
+            .timestamp_millis(),
+          model: "codex-auto-review".to_string(),
+          total_tokens: 200,
+          plan_type: None,
+          rate_limits: None,
+        }],
+      },
+    ];
+
+    let stats = build_stats_from_threads(
+      threads,
+      now,
+      30,
+      test_account(),
+      None,
+      true,
+      json!({ "test": true }),
+    );
+
+    assert_eq!(stats.totals.threads, 2);
+    assert_eq!(stats.totals.active_threads, 1);
+    assert_eq!(stats.totals.archived_threads, 1);
+    assert_eq!(stats.totals.total_tokens, 1500);
+    assert_eq!(stats.featured.period_tokens, 1700);
+    assert_eq!(stats.featured.period_cost, 0.0017);
+    assert_eq!(stats.featured.latest_token_usage, 1500);
+    assert_eq!(stats.featured.cost_estimated_from_token_events, true);
+    assert_eq!(stats.rate_limits.as_ref().unwrap().windows[0].label, "5 小时");
+    assert_eq!(stats.rate_limits.as_ref().unwrap().windows[0].remaining_percent, 92.0);
+    assert_eq!(stats.models[0].name, "gpt-5.5");
+    assert!(stats.sources.iter().any(|source| source.name == "VS Code" && source.value == 1));
+    assert!(stats.sources.iter().any(|source| source.name == "子任务" && source.value == 1));
+    assert_eq!(stats.daily_series.len(), 30);
+    assert_eq!(stats.daily_series[28].threads, 1);
+    assert_eq!(stats.latest_threads[0].id, "one");
+  }
+
+  #[test]
+  fn read_claude_session_deduplicates_repeated_assistant_updates() {
+    let file_path = temp_jsonl_path("session-one.jsonl");
+    let rows = [
+      json!({
+        "type": "custom-title",
+        "customTitle": "Dedup session",
+        "sessionId": "session-one"
+      }),
+      json!({
+        "type": "user",
+        "timestamp": "2026-06-30T10:00:00.000Z",
+        "sessionId": "session-one",
+        "cwd": "/work/app",
+        "entrypoint": "cli",
+        "message": { "role": "user", "content": "hello" }
+      }),
+      json!({
+        "type": "assistant",
+        "timestamp": "2026-06-30T10:00:10.000Z",
+        "sessionId": "session-one",
+        "cwd": "/work/app",
+        "message": {
+          "id": "msg-one",
+          "model": "claude-opus-4-8",
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 30,
+            "output_tokens": 40
+          }
+        }
+      }),
+      json!({
+        "type": "assistant",
+        "timestamp": "2026-06-30T10:00:12.000Z",
+        "sessionId": "session-one",
+        "cwd": "/work/app",
+        "message": {
+          "id": "msg-one",
+          "model": "claude-opus-4-8",
+          "usage": {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 30,
+            "output_tokens": 40
+          }
+        }
+      }),
+    ];
+    let mut file = File::create(&file_path).expect("test jsonl should be created");
+    for row in rows {
+      writeln!(file, "{row}").expect("test jsonl row should be written");
+    }
+
+    let session = read_claude_session(&file_path).expect("session should parse");
+
+    assert_eq!(session.id, "session-one");
+    assert_eq!(session.title, "Dedup session");
+    assert_eq!(session.source, "CLI");
+    assert_eq!(session.tokens_used, 100);
+    assert_eq!(session.usage_events.len(), 1);
+
+    let _ = fs::remove_dir_all(file_path.parent().unwrap());
+  }
 }
 
 fn main() {
