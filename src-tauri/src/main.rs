@@ -712,6 +712,7 @@ fn build_stats_from_threads(
   let period_cost = estimate_cost(period_tokens);
   let latest_plan_type = usage_events
     .iter()
+    .filter(|event| event.plan_type.is_some())
     .max_by_key(|event| event.timestamp_ms)
     .and_then(|event| event.plan_type.clone());
   let plan_monthly_cost = account.plan_monthly_usd;
@@ -907,6 +908,7 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
   let latest_plan_type = threads
     .iter()
     .flat_map(|thread| thread.usage_events.iter())
+    .filter(|event| event.plan_type.is_some())
     .max_by_key(|event| event.timestamp_ms)
     .and_then(|event| event.plan_type.as_deref());
   let account = read_codex_account(&home, latest_plan_type);
@@ -1000,12 +1002,13 @@ fn read_claude_session(path: &Path) -> Option<Thread> {
       }
     }
     if source.is_empty() {
-      source = normalize_claude_source(
-        entry
-          .get("entrypoint")
-          .or_else(|| entry.get("promptSource"))
-          .and_then(Value::as_str),
-      );
+      if let Some(source_value) = entry
+        .get("entrypoint")
+        .or_else(|| entry.get("promptSource"))
+        .and_then(Value::as_str)
+      {
+        source = normalize_claude_source(Some(source_value));
+      }
     }
     if entry.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
       sidechain = true;
@@ -1084,8 +1087,10 @@ fn read_claude_session(path: &Path) -> Option<Thread> {
     } else {
       title
     },
-    source: if sidechain && source == "Claude Code" {
+    source: if sidechain && source.is_empty() {
       "子任务".to_string()
+    } else if source.is_empty() {
+      "Claude Code".to_string()
     } else {
       source
     },

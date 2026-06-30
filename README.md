@@ -56,36 +56,11 @@ cp -R "src-tauri/target/release/bundle/macos/AI Usage.app" /Applications/
 open "/Applications/AI Usage.app"
 ```
 
-Optional DMG build:
-
-```sh
-npm run package:mac:dmg
-```
-
-DMG output:
-
-- `src-tauri/target/release/bundle/dmg/AI Usage_<version>_<arch>.dmg`
-
-Install from DMG:
-
-1. Open the `.dmg` file.
-2. Drag `AI Usage.app` into `/Applications`.
-3. Open `AI Usage` from `/Applications`.
-
 For unsigned local test builds, macOS may show "damaged" or block the app. You can clear the quarantine attribute for a trusted local build:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/AI Usage.app"
 open "/Applications/AI Usage.app"
-```
-
-For a downloaded unsigned DMG:
-
-```sh
-xattr -dr com.apple.quarantine ~/Downloads/AI\ Usage_0.1.0_aarch64.dmg
-open ~/Downloads/AI\ Usage_0.1.0_aarch64.dmg
-xattr -dr com.apple.quarantine /Applications/AI\ Usage.app
-open /Applications/AI\ Usage.app
 ```
 
 For normal distribution to other users, sign with a Developer ID certificate and notarize the app.

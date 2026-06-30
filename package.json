@@ -15,7 +15,6 @@
     "icons": "node scripts/generate-icons.js",
     "test": "node --test",
     "package:mac": "tauri build --bundles app",
-    "package:mac:dmg": "tauri build --bundles dmg",
     "package:win": "tauri build --bundles nsis",
     "package:linux": "tauri build --bundles appimage,deb"
   },
