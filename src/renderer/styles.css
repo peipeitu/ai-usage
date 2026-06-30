@@ -253,35 +253,19 @@ input {
 }
 
 .brand-mark {
-  display: flex;
-  align-items: end;
-  justify-content: center;
-  gap: 3px;
+  display: block;
   width: 34px;
   height: 34px;
-  border: 1px solid var(--line);
   border-radius: 10px;
-  background: var(--accent);
-  padding: 8px 0;
+  overflow: hidden;
+  background: #172420;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.65) inset;
 }
 
-.brand-mark span {
+.brand-mark img {
   display: block;
-  width: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-}
-
-.brand-mark span:nth-child(1) {
-  height: 9px;
-}
-
-.brand-mark span:nth-child(2) {
-  height: 15px;
-}
-
-.brand-mark span:nth-child(3) {
-  height: 11px;
+  width: 100%;
+  height: 100%;
 }
 
 .brand strong,

@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
+    "icons": "node scripts/generate-icons.js",
     "test": "node --test",
     "package:mac": "electron-builder --mac --publish never",
     "package:win": "electron-builder --win --publish never",
@@ -28,15 +29,18 @@
   "build": {
     "appId": "dev.workerpei.aiusage",
     "productName": "AI Usage",
+    "icon": "build/icon.png",
     "files": [
       "src/**/*",
       "package.json"
     ],
     "mac": {
+      "icon": "build/icon.icns",
       "artifactName": "ai-usage-${version}-macos-${arch}.${ext}",
       "category": "public.app-category.developer-tools"
     },
     "linux": {
+      "icon": "build/icons",
       "artifactName": "ai-usage-${version}-linux-${arch}.${ext}",
       "syncDesktopName": true,
       "maintainer": "peipeitu <peipeitu@users.noreply.github.com>",
@@ -47,6 +51,7 @@
       "category": "Development"
     },
     "win": {
+      "icon": "build/icon.ico",
       "artifactName": "ai-usage-${version}-windows-${arch}.${ext}",
       "target": "nsis"
     }
