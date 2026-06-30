@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "description": "A cross-platform desktop dashboard for local AI coding usage statistics.",
-  "author": "peipeitu",
+  "author": {
+    "name": "peipeitu",
+    "email": "peipeitu@users.noreply.github.com"
+  },
   "main": "src/main/main.js",
   "type": "commonjs",
   "scripts": {
@@ -34,6 +37,9 @@
     },
     "linux": {
       "artifactName": "ai-usage-${version}-linux-${arch}.${ext}",
+      "desktopName": "ai-usage",
+      "syncDesktopName": true,
+      "maintainer": "peipeitu <peipeitu@users.noreply.github.com>",
       "target": [
         "AppImage",
         "deb"
