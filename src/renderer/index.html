@@ -9,6 +9,7 @@
   <body>
     <main class="app-shell">
       <aside class="sidebar">
+        <div class="sidebar-drag-region" data-tauri-drag-region aria-hidden="true"></div>
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">
             <img src="./assets/app-icon.svg" alt="" />
@@ -52,10 +53,10 @@
       </aside>
 
       <section class="workspace">
-        <header class="workspace-topbar">
-          <div>
-            <p id="viewEyebrow" class="eyebrow">Codex usage</p>
-            <h1 id="viewTitle">概览</h1>
+        <header class="workspace-topbar" data-tauri-drag-region>
+          <div data-tauri-drag-region>
+            <p id="viewEyebrow" class="eyebrow" data-tauri-drag-region>Codex usage</p>
+            <h1 id="viewTitle" data-tauri-drag-region>概览</h1>
           </div>
           <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
             <span aria-hidden="true">↻</span>

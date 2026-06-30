@@ -252,8 +252,22 @@ input {
   background: var(--sidebar);
 }
 
+.sidebar-drag-region {
+  display: none;
+}
+
 body[data-platform="darwin"] .sidebar {
   padding-top: 52px;
+}
+
+body[data-platform="darwin"] .sidebar-drag-region {
+  -webkit-app-region: drag;
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: block;
+  height: 52px;
 }
 
 .brand {
