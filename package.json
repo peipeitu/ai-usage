@@ -8,52 +8,19 @@
     "name": "peipeitu",
     "email": "peipeitu@users.noreply.github.com"
   },
-  "main": "src/main/main.js",
   "type": "commonjs",
   "scripts": {
-    "dev": "electron .",
-    "start": "electron .",
+    "dev": "tauri dev",
+    "start": "tauri dev",
     "icons": "node scripts/generate-icons.js",
     "test": "node --test",
-    "package:mac": "electron-builder --mac --publish never",
-    "package:win": "electron-builder --win --publish never",
-    "package:linux": "electron-builder --linux --publish never"
+    "package:mac": "tauri build --bundles app",
+    "package:mac:dmg": "tauri build --bundles dmg",
+    "package:win": "tauri build --bundles nsis",
+    "package:linux": "tauri build --bundles appimage,deb"
   },
-  "dependencies": {
-    "sql.js": "^1.11.0"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "electron": "^42.5.1",
-    "electron-builder": "^26.15.3"
-  },
-  "build": {
-    "appId": "dev.workerpei.aiusage",
-    "productName": "AI Usage",
-    "icon": "build/icon.png",
-    "files": [
-      "src/**/*",
-      "package.json"
-    ],
-    "mac": {
-      "icon": "build/icon.icns",
-      "artifactName": "ai-usage-${version}-macos-${arch}.${ext}",
-      "category": "public.app-category.developer-tools"
-    },
-    "linux": {
-      "icon": "build/icons",
-      "artifactName": "ai-usage-${version}-linux-${arch}.${ext}",
-      "syncDesktopName": true,
-      "maintainer": "peipeitu <peipeitu@users.noreply.github.com>",
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "Development"
-    },
-    "win": {
-      "icon": "build/icon.ico",
-      "artifactName": "ai-usage-${version}-windows-${arch}.${ext}",
-      "target": "nsis"
-    }
+    "@tauri-apps/cli": "^2.0.0"
   }
 }

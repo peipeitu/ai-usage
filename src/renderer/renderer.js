@@ -6,7 +6,16 @@ const wholeFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0
 });
 
-document.body.dataset.platform = window.aiUsage.platform || "unknown";
+const tauriCore = window.__TAURI__?.core;
+const aiUsage = window.aiUsage || {
+  platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
+  getStats: (provider) => tauriCore.invoke("get_stats", { provider }),
+  chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
+  getSettings: () => tauriCore.invoke("get_settings"),
+  updateSettings: (settings) => tauriCore.invoke("update_settings", { settings })
+};
+
+document.body.dataset.platform = aiUsage.platform || "unknown";
 
 let currentSettings = {
   activeProvider: "codex",
@@ -409,7 +418,7 @@ function renderStats(stats) {
 async function refreshStats() {
   setLoading(true);
   try {
-    const stats = await window.aiUsage.getStats(currentSettings.activeProvider);
+    const stats = await aiUsage.getStats(currentSettings.activeProvider);
     renderStats(stats);
   } catch (error) {
     const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
@@ -420,7 +429,7 @@ async function refreshStats() {
 }
 
 async function saveSettings(nextSettings, shouldRefresh = true) {
-  currentSettings = await window.aiUsage.updateSettings({
+  currentSettings = await aiUsage.updateSettings({
     ...currentSettings,
     ...nextSettings
   });
@@ -433,7 +442,7 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
 async function chooseHome(providerId) {
   setLoading(true);
   try {
-    const result = await window.aiUsage.chooseHome(providerId);
+    const result = await aiUsage.chooseHome(providerId);
     if (result) {
       currentSettings = result.settings;
       renderSettings();
@@ -478,7 +487,7 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 });
 
 async function boot() {
-  currentSettings = await window.aiUsage.getSettings();
+  currentSettings = await aiUsage.getSettings();
   renderSettings();
   setView(currentView);
   await refreshStats();
