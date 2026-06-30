@@ -303,6 +303,11 @@ fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
   Ok(Some(ChooseHomeResult { settings, stats }))
 }
 
+#[tauri::command]
+fn start_window_drag(window: tauri::Window) -> Result<(), String> {
+  window.start_dragging().map_err(|error| error.to_string())
+}
+
 fn read_stats_for_provider(settings: &Settings, provider: &str) -> Result<Stats, String> {
   if provider == "claude" {
     read_claude_stats(settings)
@@ -1177,7 +1182,8 @@ fn main() {
       get_settings,
       update_settings,
       get_stats,
-      choose_home
+      choose_home,
+      start_window_drag
     ])
     .run(tauri::generate_context!())
     .expect("error while running AI Usage");

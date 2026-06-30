@@ -1,10 +1,23 @@
 const tauriCore = window.__TAURI__?.core;
+const tauriWindow = window.__TAURI__?.window;
 const aiUsage = window.aiUsage || {
   platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
   getStats: (provider) => tauriCore.invoke("get_stats", { provider }),
   chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
   getSettings: () => tauriCore.invoke("get_settings"),
-  updateSettings: (settings) => tauriCore.invoke("update_settings", { settings })
+  updateSettings: (settings) => tauriCore.invoke("update_settings", { settings }),
+  startWindowDrag: async () => {
+    const currentWindow = tauriWindow?.getCurrentWindow?.();
+    if (currentWindow?.startDragging) {
+      try {
+        await currentWindow.startDragging();
+        return;
+      } catch {
+        // Fall through to the local Rust command when the JS window API is unavailable or denied.
+      }
+    }
+    return tauriCore.invoke("start_window_drag");
+  }
 };
 
 document.body.dataset.platform = aiUsage.platform || "unknown";
@@ -732,6 +745,20 @@ async function chooseHome(providerId) {
   }
 }
 
+function shouldStartWindowDrag(event) {
+  if (event.button !== 0) return false;
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  if (!target?.closest("[data-tauri-drag-region]")) return false;
+  return !target.closest("button, input, select, textarea, a, [role='button']");
+}
+
+function startWindowDrag(event) {
+  if (!shouldStartWindowDrag(event)) return;
+  event.preventDefault();
+  aiUsage.startWindowDrag().catch(() => {});
+}
+
+document.addEventListener("pointerdown", startWindowDrag, true);
 elements.refreshButton.addEventListener("click", refreshStats);
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));

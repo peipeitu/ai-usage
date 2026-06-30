@@ -261,7 +261,6 @@ body[data-platform="darwin"] .sidebar {
 }
 
 body[data-platform="darwin"] .sidebar-drag-region {
-  -webkit-app-region: drag;
   position: absolute;
   top: 0;
   right: 0;
@@ -409,7 +408,6 @@ body[data-platform="darwin"] .workspace {
 }
 
 .workspace-topbar {
-  -webkit-app-region: drag;
   display: flex;
   align-items: center;
   justify-content: space-between;
