@@ -3,6 +3,16 @@ name: Build
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: "Target platform"
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - linux
+          - macos
+          - all
       package:
         description: "Build installer artifacts"
         required: true
@@ -10,27 +20,11 @@ on:
         type: boolean
 
 jobs:
-  build:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  windows:
+    name: Windows
+    if: ${{ inputs.platform == 'windows' || inputs.platform == 'all' }}
+    runs-on: windows-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            package-script: package:mac
-            artifact-name: ai-usage-macos
-            artifact-path: dist/*
-          - os: windows-latest
-            package-script: package:win
-            artifact-name: ai-usage-windows
-            artifact-path: dist/*
-          - os: ubuntu-latest
-            package-script: package:linux
-            artifact-name: ai-usage-linux
-            artifact-path: dist/*
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,13 +43,81 @@ jobs:
 
       - name: Package
         if: ${{ inputs.package }}
-        run: npm run ${{ matrix.package-script }}
+        run: npm run package:win
 
       - name: Upload artifact
         if: ${{ inputs.package }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact-name }}
-          path: ${{ matrix.artifact-path }}
+          name: ai-usage-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux
+    if: ${{ inputs.platform == 'linux' || inputs.platform == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Package
+        if: ${{ inputs.package }}
+        run: npm run package:linux
+
+      - name: Upload artifact
+        if: ${{ inputs.package }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-usage-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS
+    if: ${{ inputs.platform == 'macos' || inputs.platform == 'all' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Package
+        if: ${{ inputs.package }}
+        run: npm run package:mac
+
+      - name: Upload artifact
+        if: ${{ inputs.package }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-usage-macos
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
