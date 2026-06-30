@@ -24,6 +24,18 @@
           <button id="settingsButton" class="nav-button" type="button">设置</button>
         </nav>
 
+        <section class="sidebar-provider" aria-label="AI 服务">
+          <span>AI 服务</span>
+          <div class="provider-options compact" role="radiogroup" aria-label="AI 服务">
+            <button class="provider-option active" type="button" data-provider="codex" aria-checked="true">
+              <span>Codex</span>
+            </button>
+            <button class="provider-option" type="button" data-provider="claude" aria-checked="false">
+              <span>Claude Code</span>
+            </button>
+          </div>
+        </section>
+
         <section class="sidebar-usage" aria-label="Period usage">
           <span>剩余用量</span>
           <strong id="sidebarRemainingUsage">-</strong>
@@ -55,12 +67,12 @@
         <section id="homeView">
           <div class="overview-meta">
             <span>数据源</span>
-            <strong>Codex</strong>
+            <strong id="overviewProvider">Codex</strong>
             <span id="overviewPeriod">近 30 天</span>
             <span>本地日志估算</span>
           </div>
 
-          <section class="hero-metrics" aria-label="Codex featured summary">
+          <section class="hero-metrics" aria-label="Featured usage summary">
             <article class="hero-metric">
               <span>今日费用</span>
               <strong id="todayCost">-</strong>
@@ -80,7 +92,7 @@
             </article>
           </section>
 
-          <section class="summary-grid" aria-label="Codex summary">
+          <section class="summary-grid" aria-label="Usage summary">
             <article class="metric">
               <span>总会话</span>
               <strong id="threadsTotal">-</strong>
@@ -158,27 +170,18 @@
 
             <div class="settings-list">
               <label class="setting-row">
-                <span>AI 服务</span>
-                <div class="provider-options" role="radiogroup" aria-label="AI 服务">
-                  <button class="provider-option active" type="button" aria-checked="true">
-                    <span>Codex</span>
-                  </button>
-                  <button class="provider-option" type="button" disabled>
-                    <span>Claude Code</span>
-                    <em>开发中</em>
-                  </button>
-                  <button class="provider-option" type="button" disabled>
-                    <span>Cursor</span>
-                    <em>开发中</em>
-                  </button>
+                <span>Codex 数据目录</span>
+                <div class="setting-control folder-control">
+                  <code id="codexHomeValue">-</code>
+                  <button id="chooseCodexHomeButton" class="secondary-button" type="button">选择目录</button>
                 </div>
               </label>
 
               <label class="setting-row">
-                <span>Codex 数据目录</span>
+                <span>Claude Code 数据目录</span>
                 <div class="setting-control folder-control">
-                  <code id="codexHomeValue">-</code>
-                  <button id="chooseHomeButton" class="secondary-button" type="button">选择目录</button>
+                  <code id="claudeHomeValue">-</code>
+                  <button id="chooseClaudeHomeButton" class="secondary-button" type="button">选择目录</button>
                 </div>
               </label>
 

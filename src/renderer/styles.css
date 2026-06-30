@@ -169,6 +169,13 @@ input {
   font: inherit;
 }
 
+button,
+select,
+input,
+a {
+  -webkit-app-region: no-drag;
+}
+
 button {
   min-height: 32px;
   border: 0;
@@ -245,6 +252,10 @@ input {
   background: var(--sidebar);
 }
 
+body[data-platform="darwin"] .sidebar {
+  padding-top: 52px;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -312,6 +323,33 @@ input {
   box-shadow: none;
 }
 
+.sidebar-provider {
+  display: grid;
+  gap: 8px;
+  margin: 2px 6px 0;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.sidebar-provider > span {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.sidebar-provider .provider-options {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+
+.sidebar-provider .provider-option {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 32px;
+}
+
 .sidebar-usage {
   display: grid;
   gap: 6px;
@@ -352,12 +390,32 @@ input {
   padding: 22px 26px 34px;
 }
 
+body[data-platform="darwin"] .workspace {
+  padding-top: 0;
+}
+
 .workspace-topbar {
+  -webkit-app-region: drag;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 18px;
+  min-height: 64px;
+  margin: 0 -26px 18px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  padding: 15px 26px 13px;
+  background: color-mix(in srgb, var(--bg) 86%, var(--panel));
+  backdrop-filter: blur(18px);
+}
+
+body[data-platform="darwin"] .workspace-topbar {
+  min-height: 68px;
+  padding-top: 18px;
+}
+
+.workspace-topbar .eyebrow,
+.workspace-topbar h1 {
+  user-select: none;
 }
 
 .overview-meta {

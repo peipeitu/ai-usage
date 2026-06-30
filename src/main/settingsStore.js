@@ -3,12 +3,15 @@ const path = require("node:path");
 const { DEFAULT_CHART_DAYS } = require("./codexStats");
 
 const DEFAULT_SETTINGS = {
+  activeProvider: "codex",
   codexHome: "",
+  claudeHome: "",
   theme: "system",
   accentColor: "blue",
   chartDays: DEFAULT_CHART_DAYS
 };
 const ACCENT_COLORS = ["blue", "turquoise", "green", "purple", "red", "orange", "graphite"];
+const PROVIDERS = ["codex", "claude"];
 
 function clampNumber(value, fallback, min, max) {
   const number = Number(value);
@@ -18,7 +21,9 @@ function clampNumber(value, fallback, min, max) {
 
 function normalizeSettings(settings = {}) {
   return {
+    activeProvider: PROVIDERS.includes(settings.activeProvider) ? settings.activeProvider : DEFAULT_SETTINGS.activeProvider,
     codexHome: typeof settings.codexHome === "string" ? settings.codexHome : DEFAULT_SETTINGS.codexHome,
+    claudeHome: typeof settings.claudeHome === "string" ? settings.claudeHome : DEFAULT_SETTINGS.claudeHome,
     theme: ["system", "light", "dark"].includes(settings.theme) ? settings.theme : DEFAULT_SETTINGS.theme,
     accentColor: ACCENT_COLORS.includes(settings.accentColor)
       ? settings.accentColor
@@ -62,6 +67,7 @@ function createSettingsStore(userDataPath) {
 module.exports = {
   DEFAULT_SETTINGS,
   ACCENT_COLORS,
+  PROVIDERS,
   createSettingsStore,
   normalizeSettings
 };

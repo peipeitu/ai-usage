@@ -6,13 +6,32 @@ const wholeFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0
 });
 
+document.body.dataset.platform = window.aiUsage.platform || "unknown";
+
 let currentSettings = {
+  activeProvider: "codex",
   codexHome: "",
+  claudeHome: "",
   theme: "system",
   accentColor: "blue",
   chartDays: 30
 };
 let currentView = "home";
+
+const PROVIDERS = {
+  codex: {
+    label: "Codex",
+    usageLabel: "Codex usage",
+    initials: "CD",
+    defaultHome: "~/.codex"
+  },
+  claude: {
+    label: "Claude Code",
+    usageLabel: "Claude Code usage",
+    initials: "CC",
+    defaultHome: "~/.claude"
+  }
+};
 
 const elements = {
   homeView: document.getElementById("homeView"),
@@ -24,6 +43,7 @@ const elements = {
   sidebarPeriodMeta: document.getElementById("sidebarPeriodMeta"),
   viewEyebrow: document.getElementById("viewEyebrow"),
   viewTitle: document.getElementById("viewTitle"),
+  overviewProvider: document.getElementById("overviewProvider"),
   accountInitials: document.getElementById("accountInitials"),
   accountName: document.getElementById("accountName"),
   accountPlan: document.getElementById("accountPlan"),
@@ -50,8 +70,11 @@ const elements = {
   workspaceList: document.getElementById("workspaceList"),
   recentThreads: document.getElementById("recentThreads"),
   refreshButton: document.getElementById("refreshButton"),
-  chooseHomeButton: document.getElementById("chooseHomeButton"),
+  chooseCodexHomeButton: document.getElementById("chooseCodexHomeButton"),
+  chooseClaudeHomeButton: document.getElementById("chooseClaudeHomeButton"),
   codexHomeValue: document.getElementById("codexHomeValue"),
+  claudeHomeValue: document.getElementById("claudeHomeValue"),
+  providerButtons: Array.from(document.querySelectorAll("[data-provider]")),
   themeSelect: document.getElementById("themeSelect"),
   accentButtons: Array.from(document.querySelectorAll("[data-accent]")),
   periodButtons: Array.from(document.querySelectorAll("[data-days]")),
@@ -140,18 +163,20 @@ function applyAccent(accentColor) {
 function setView(view) {
   currentView = view;
   const isSettings = view === "settings";
+  const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
   elements.homeView.hidden = isSettings;
   elements.settingsView.hidden = !isSettings;
   elements.refreshButton.hidden = isSettings;
   elements.homeButton.classList.toggle("active", !isSettings);
   elements.settingsButton.classList.toggle("active", isSettings);
-  elements.viewEyebrow.textContent = isSettings ? "Preferences" : "Codex usage";
+  elements.viewEyebrow.textContent = isSettings ? "Preferences" : provider.usageLabel;
   elements.viewTitle.textContent = isSettings ? "设置" : "概览";
 }
 
 function setLoading(isLoading) {
   elements.refreshButton.disabled = isLoading;
-  elements.chooseHomeButton.disabled = isLoading;
+  elements.chooseCodexHomeButton.disabled = isLoading;
+  elements.chooseClaudeHomeButton.disabled = isLoading;
   elements.refreshButton.classList.toggle("loading", isLoading);
 }
 
@@ -161,7 +186,13 @@ function renderError(message) {
 }
 
 function renderSettings() {
-  elements.codexHomeValue.textContent = currentSettings.codexHome || "~/.codex";
+  elements.codexHomeValue.textContent = currentSettings.codexHome || PROVIDERS.codex.defaultHome;
+  elements.claudeHomeValue.textContent = currentSettings.claudeHome || PROVIDERS.claude.defaultHome;
+  for (const button of elements.providerButtons) {
+    const isActive = button.dataset.provider === currentSettings.activeProvider;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-checked", String(isActive));
+  }
   elements.themeSelect.value = currentSettings.theme;
   applyAccent(currentSettings.accentColor);
   elements.chartDaysInput.value = currentSettings.chartDays;
@@ -172,6 +203,7 @@ function renderSettings() {
   }
   elements.settingsStatus.textContent = "已保存";
   applyTheme(currentSettings.theme);
+  setView(currentView);
 }
 
 function renderRankList(container, items, options = {}) {
@@ -337,8 +369,10 @@ function renderRecentThreads(threads) {
 function renderStats(stats) {
   const chartDays = stats.settings?.chartDays || currentSettings.chartDays;
   const mainLimit = primaryRateLimit(stats);
+  const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
   renderError(stats.error);
 
+  elements.overviewProvider.textContent = provider.label;
   elements.periodCostLabel.textContent = `近 ${chartDays} 天费用`;
   elements.periodTokensLabel.textContent = `近 ${chartDays} 天 token 用量`;
   elements.activityTitle.textContent = `近 ${chartDays} 天趋势`;
@@ -351,7 +385,7 @@ function renderStats(stats) {
   elements.sidebarRemainingUsage.textContent = mainLimit ? formatPercent(mainLimit.remainingPercent) : "-";
   elements.sidebarPeriodMeta.textContent = mainLimit
     ? `${mainLimit.label} · ${formatResetTime(mainLimit)} 重置`
-    : "等待 Codex 日志";
+    : `等待 ${provider.label} 日志`;
   elements.periodTokens.textContent = formatCompact(stats.featured.periodTokens);
   elements.latestTokenUsage.textContent = formatCompact(stats.featured.latestTokenUsage);
 
@@ -360,9 +394,9 @@ function renderStats(stats) {
   elements.tokensTotal.textContent = formatCompact(stats.totals.totalTokens);
   elements.updatedThisWeek.textContent = formatCompact(stats.totals.updatedThisWeek);
   elements.lastUpdated.textContent = `更新于 ${formatDate(stats.generatedAt)}`;
-  elements.accountInitials.textContent = stats.account?.initials || "CD";
-  elements.accountName.textContent = stats.account?.displayName || "Codex";
-  elements.accountPlan.textContent = stats.account?.planLabel || "Codex";
+  elements.accountInitials.textContent = stats.account?.initials || provider.initials;
+  elements.accountName.textContent = stats.account?.displayName || provider.label;
+  elements.accountPlan.textContent = stats.account?.planLabel || provider.label;
 
   renderDailyChart(stats.dailySeries);
   renderRateLimits(stats.rateLimits);
@@ -375,10 +409,11 @@ function renderStats(stats) {
 async function refreshStats() {
   setLoading(true);
   try {
-    const stats = await window.aiUsage.getCodexStats();
+    const stats = await window.aiUsage.getStats(currentSettings.activeProvider);
     renderStats(stats);
   } catch (error) {
-    renderError(error.message || "无法读取 Codex 统计");
+    const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
+    renderError(error.message || `无法读取 ${provider.label} 统计`);
   } finally {
     setLoading(false);
   }
@@ -395,17 +430,18 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
   }
 }
 
-async function chooseCodexHome() {
+async function chooseHome(providerId) {
   setLoading(true);
   try {
-    const result = await window.aiUsage.chooseCodexHome();
+    const result = await window.aiUsage.chooseHome(providerId);
     if (result) {
       currentSettings = result.settings;
       renderSettings();
       renderStats(result.stats);
     }
   } catch (error) {
-    renderError(error.message || "无法切换 Codex 目录");
+    const provider = PROVIDERS[providerId] || PROVIDERS.codex;
+    renderError(error.message || `无法切换 ${provider.label} 目录`);
   } finally {
     setLoading(false);
   }
@@ -414,7 +450,13 @@ async function chooseCodexHome() {
 elements.refreshButton.addEventListener("click", refreshStats);
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));
-elements.chooseHomeButton.addEventListener("click", chooseCodexHome);
+elements.chooseCodexHomeButton.addEventListener("click", () => chooseHome("codex"));
+elements.chooseClaudeHomeButton.addEventListener("click", () => chooseHome("claude"));
+for (const button of elements.providerButtons) {
+  button.addEventListener("click", async () => {
+    await saveSettings({ activeProvider: button.dataset.provider });
+  });
+}
 elements.themeSelect.addEventListener("change", async () => {
   await saveSettings({ theme: elements.themeSelect.value }, false);
 });
