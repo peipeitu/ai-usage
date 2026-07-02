@@ -191,7 +191,7 @@ button {
   color: #ffffff;
   background: var(--accent);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 590;
   cursor: pointer;
 }
 
@@ -207,11 +207,25 @@ button {
   color: var(--ink);
   background: var(--panel);
   font-size: 18px;
-  font-weight: 500;
+  font-weight: 460;
 }
 
 .icon-button.loading span {
   animation: spin 0.8s linear infinite;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-button {
+  min-height: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 68%, var(--panel));
+  font-weight: 540;
 }
 
 @keyframes shimmer {
@@ -344,7 +358,7 @@ body[data-platform="darwin"] .sidebar-drag-region {
 
 .brand strong {
   font-size: 14px;
-  font-weight: 720;
+  font-weight: 660;
 }
 
 .brand span {
@@ -366,13 +380,13 @@ body[data-platform="darwin"] .sidebar-drag-region {
   padding: 0 10px;
   color: var(--muted);
   background: transparent;
-  font-weight: 600;
+  font-weight: 540;
   line-height: 1;
 }
 
 .nav-button.primary {
   font-size: 14px;
-  font-weight: 680;
+  font-weight: 620;
 }
 
 .nav-button.active {
@@ -392,7 +406,7 @@ body[data-platform="darwin"] .sidebar-drag-region {
 .sidebar-provider > span {
   color: var(--faint);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 640;
   text-transform: uppercase;
 }
 
@@ -419,7 +433,7 @@ body[data-platform="darwin"] .sidebar-drag-region {
 .sidebar-usage span {
   color: var(--faint);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 640;
   text-transform: uppercase;
 }
 
@@ -427,7 +441,7 @@ body[data-platform="darwin"] .sidebar-drag-region {
   overflow: hidden;
   color: var(--ink);
   font-size: 20px;
-  font-weight: 560;
+  font-weight: 500;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -438,7 +452,7 @@ body[data-platform="darwin"] .sidebar-drag-region {
   overflow: hidden;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 520;
+  font-weight: 480;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -528,7 +542,7 @@ body[data-platform="darwin"] .workspace-topbar {
 
 .overview-meta strong {
   color: var(--ink);
-  font-weight: 640;
+  font-weight: 580;
 }
 
 .overview-meta span + span::before,
@@ -564,7 +578,7 @@ body[data-platform="darwin"] .workspace-topbar {
   color: #ffffff;
   background: #33445a;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 640;
 }
 
 .account-pill strong,
@@ -578,7 +592,7 @@ body[data-platform="darwin"] .workspace-topbar {
 
 .account-pill strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 590;
 }
 
 .account-pill span {
@@ -590,7 +604,7 @@ body[data-platform="darwin"] .workspace-topbar {
   margin: 0 0 4px;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 590;
   letter-spacing: 0;
 }
 
@@ -602,13 +616,13 @@ p {
 
 h1 {
   font-size: 24px;
-  font-weight: 720;
+  font-weight: 660;
   line-height: 1.1;
 }
 
 h2 {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 640;
   line-height: 1.2;
 }
 
@@ -672,7 +686,7 @@ h2 {
   overflow: hidden;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 620;
+  font-weight: 560;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -685,7 +699,7 @@ h2 {
   display: block;
   overflow: hidden;
   font-size: 23px;
-  font-weight: 560;
+  font-weight: 500;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -697,7 +711,7 @@ h2 {
   margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 520;
+  font-weight: 480;
 }
 
 .metric {
@@ -712,7 +726,7 @@ h2 {
 
 .metric strong {
   font-size: 18px;
-  font-weight: 500;
+  font-weight: 460;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -747,14 +761,17 @@ h2 {
 
 .chart-wrap {
   position: relative;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .daily-chart {
   display: grid;
-  grid-template-columns: repeat(var(--days, 30), minmax(11px, 1fr));
+  grid-template-columns: repeat(var(--days, 30), minmax(0, 1fr));
   align-items: end;
-  gap: 6px;
+  gap: var(--chart-gap, 6px);
   height: 230px;
+  min-width: 0;
 }
 
 .day-column {
@@ -816,7 +833,7 @@ h2 {
 .chart-tooltip strong {
   margin-bottom: 5px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 590;
 }
 
 .chart-tooltip span {
@@ -844,14 +861,14 @@ h2 {
 .limit-row strong {
   color: var(--ink);
   font-size: 18px;
-  font-weight: 650;
+  font-weight: 590;
   line-height: 1;
 }
 
 .limit-row span {
   color: var(--muted);
   font-size: 18px;
-  font-weight: 500;
+  font-weight: 460;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -900,7 +917,7 @@ h2 {
 .rank-label {
   overflow: hidden;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 590;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -941,7 +958,7 @@ h2 {
 .thread-row strong {
   margin-bottom: 4px;
   font-size: 13px;
-  font-weight: 680;
+  font-weight: 620;
 }
 
 .thread-row span {
@@ -952,7 +969,7 @@ h2 {
 .thread-token {
   color: var(--ink);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 640;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1044,18 +1061,18 @@ body[data-platform="darwin"] .settings-rail {
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
-  gap: 10px;
+  gap: 8px;
   min-height: 34px;
   padding: 0 8px;
   color: var(--muted);
   background: transparent;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 590;
 }
 
 .settings-back span:first-child {
   font-size: 18px;
-  font-weight: 500;
+  font-weight: 300;
 }
 
 .settings-back:hover {
@@ -1065,28 +1082,29 @@ body[data-platform="darwin"] .settings-rail {
 
 .settings-nav {
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .settings-nav-heading {
   margin: 16px 8px 4px;
   color: var(--faint);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 640;
 }
 
 .settings-nav-item {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px;
-  min-height: 36px;
+  gap: 10px;
+  min-width: 0;
+  min-height: 30px;
   border-radius: 18px;
-  padding: 0 12px;
+  padding: 0 10px;
   color: var(--muted);
   background: transparent;
   font-size: 14px;
-  font-weight: 620;
+  font-weight: 420;
 }
 
 .settings-nav-item span:first-child {
@@ -1094,6 +1112,44 @@ body[data-platform="darwin"] .settings-rail {
   color: var(--ink);
   font-size: 15px;
   text-align: center;
+}
+
+.settings-nav-icon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+}
+
+.settings-nav-icon img {
+  display: block;
+  width: 17px;
+  height: 17px;
+  object-fit: contain;
+}
+
+.settings-nav-item span:not(:first-child) {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 420;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav-item.inactive-provider {
+  color: color-mix(in srgb, var(--faint) 64%, var(--panel));
+}
+
+.settings-nav-item.inactive-provider span:first-child {
+  color: color-mix(in srgb, var(--faint) 54%, var(--panel));
+}
+
+.settings-nav-item.inactive-provider .provider-logo {
+  filter: grayscale(1);
+  opacity: 0.34;
 }
 
 .settings-nav-item.active {
@@ -1115,40 +1171,44 @@ body[data-platform="darwin"] .settings-rail {
   justify-content: space-between;
   gap: 16px;
   width: min(760px, 100%);
-  margin: 0 auto 58px;
+  margin: 0 auto 12px;
 }
 
-.settings-content-header h2 {
+.settings-primary-heading {
   color: var(--ink);
   font-size: 24px;
-  font-weight: 760;
+  font-weight: 600;
   line-height: 1.1;
 }
 
 .settings-content-header span {
   color: var(--faint);
   font-size: 12px;
-  font-weight: 620;
+  font-weight: 560;
 }
 
 .settings-list {
   display: grid;
-  gap: 62px;
+  gap: 14px;
   width: min(760px, 100%);
   margin: 0 auto;
 }
 
 .settings-section {
-  scroll-margin-top: 28px;
+  scroll-margin-top: 14px;
+}
+
+.settings-group-title {
+  margin-top: 42px;
 }
 
 .settings-section-heading {
-  margin-bottom: 18px;
+  margin-bottom: 0;
 }
 
 .settings-section-heading h3 {
   font-size: 16px;
-  font-weight: 760;
+  font-weight: 620;
 }
 
 .settings-group {
@@ -1159,7 +1219,7 @@ body[data-platform="darwin"] .settings-rail {
 }
 
 .settings-group .setting-row + .setting-row {
-  border-top: 1px solid var(--line);
+  border-top: 0.5px solid color-mix(in srgb, var(--line) 54%, transparent);
 }
 
 .settings-links {
@@ -1171,17 +1231,17 @@ body[data-platform="darwin"] .settings-rail {
 
 .setting-row {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   align-items: center;
-  min-height: 62px;
-  gap: 18px;
-  padding: 13px 16px;
+  min-height: 44px;
+  gap: 6px;
+  padding: 6px 16px;
 }
 
 .setting-row > span {
   color: var(--muted);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 590;
 }
 
 .setting-control,
@@ -1232,7 +1292,7 @@ body[data-platform="darwin"] .settings-rail {
   color: var(--muted);
   background: var(--panel);
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 560;
 }
 
 .toggle-item input {
@@ -1251,6 +1311,14 @@ body[data-platform="darwin"] .settings-rail {
 
 .provider-toggle {
   justify-self: start;
+  border-color: transparent;
+  padding: 0;
+  background: transparent;
+}
+
+.provider-toggle:has(input:checked) {
+  border-color: transparent;
+  background: transparent;
 }
 
 .provider-options {
@@ -1270,13 +1338,28 @@ body[data-platform="darwin"] .settings-rail {
   color: var(--muted);
   background: var(--panel);
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 560;
 }
 
 .provider-option.active {
   color: var(--ink);
   border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
   background: var(--accent-soft);
+}
+
+.provider-option-logo {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  place-items: center;
+}
+
+.provider-option-logo img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
 }
 
 .provider-option:disabled {
@@ -1294,7 +1377,7 @@ body[data-platform="darwin"] .settings-rail {
   background: var(--panel-soft);
   font-size: 11px;
   font-style: normal;
-  font-weight: 520;
+  font-weight: 480;
 }
 
 .period-control {
@@ -1318,7 +1401,7 @@ body[data-platform="darwin"] .settings-rail {
   color: var(--muted);
   background: transparent;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 540;
 }
 
 .period-presets button.active {

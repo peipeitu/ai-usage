@@ -12,9 +12,15 @@ use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(any(windows, target_os = "linux"))]
+use tauri_plugin_updater::UpdaterExt;
 use walkdir::WalkDir;
 
+#[cfg(any(windows, target_os = "linux"))]
+const UPDATE_ENDPOINT: &str = "https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json";
+const MIN_CHART_DAYS: u32 = 7;
 const DEFAULT_CHART_DAYS: u32 = 30;
+const MAX_CHART_DAYS: u32 = 90;
 const CODEX_USD_PER_MILLION_TOKENS: f64 = 1.0;
 const CLAUDE_ESTIMATED_5H_TOKEN_LIMIT: u64 = 500_000;
 const CLAUDE_ESTIMATED_WEEKLY_TOKEN_LIMIT: u64 = 2_500_000;
@@ -33,6 +39,8 @@ struct Settings {
     copilot_home: String,
     #[serde(default)]
     cursor_home: String,
+    #[serde(default)]
+    chatgpt_home: String,
     #[serde(default = "default_language")]
     language: String,
     theme: String,
@@ -54,6 +62,17 @@ struct Account {
 #[serde(rename_all = "camelCase")]
 struct ChartSettings {
     chart_days: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    supported: bool,
+    available: bool,
+    current_version: String,
+    version: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,6 +218,7 @@ fn default_settings() -> Settings {
         claude_home: String::new(),
         copilot_home: String::new(),
         cursor_home: String::new(),
+        chatgpt_home: String::new(),
         language: default_language(),
         theme: "system".to_string(),
         accent_color: "blue".to_string(),
@@ -211,14 +231,14 @@ fn default_language() -> String {
 }
 
 fn default_enabled_providers() -> Vec<String> {
-    ["codex", "claude", "copilot", "cursor"]
+    ["codex", "claude", "copilot", "cursor", "chatgpt"]
         .iter()
         .map(|provider| provider.to_string())
         .collect()
 }
 
 fn normalize_settings(settings: Settings) -> Settings {
-    let providers = ["codex", "claude", "copilot", "cursor"];
+    let providers = ["codex", "claude", "copilot", "cursor", "chatgpt"];
     let languages = ["auto", "zh", "en"];
     let themes = ["system", "light", "dark"];
     let accents = [
@@ -259,6 +279,7 @@ fn normalize_settings(settings: Settings) -> Settings {
         claude_home: settings.claude_home,
         copilot_home: settings.copilot_home,
         cursor_home: settings.cursor_home,
+        chatgpt_home: settings.chatgpt_home,
         language: if languages.contains(&settings.language.as_str()) {
             settings.language
         } else {
@@ -274,7 +295,7 @@ fn normalize_settings(settings: Settings) -> Settings {
         } else {
             "blue".to_string()
         },
-        chart_days: settings.chart_days.clamp(7, 365),
+        chart_days: settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS),
     }
 }
 
@@ -306,6 +327,33 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
     fs::write(path, format!("{content}\n")).map_err(|error| error.to_string())
 }
 
+fn current_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn updater_public_key() -> Option<&'static str> {
+    option_env!("AI_USAGE_UPDATER_PUBLIC_KEY").and_then(|key| {
+        let key = key.trim();
+        if key.is_empty() {
+            None
+        } else {
+            Some(key)
+        }
+    })
+}
+
+fn unsupported_update_info() -> UpdateInfo {
+    UpdateInfo {
+        supported: false,
+        available: false,
+        current_version: current_app_version(),
+        version: None,
+        notes: None,
+        published_at: None,
+    }
+}
+
 #[tauri::command]
 fn get_settings() -> Settings {
     load_settings()
@@ -335,6 +383,7 @@ async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, Strin
         "claude" => "claude",
         "copilot" => "copilot",
         "cursor" => "cursor",
+        "chatgpt" => "chatgpt",
         _ => "codex",
     }
     .to_string();
@@ -342,6 +391,7 @@ async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, Strin
         "claude" => "Select Claude Code data directory",
         "copilot" => "Select GitHub Copilot data directory",
         "cursor" => "Select Cursor data directory",
+        "chatgpt" => "Select ChatGPT data directory",
         _ => "Select Codex data directory",
     };
 
@@ -357,6 +407,7 @@ async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, Strin
             "claude" => settings.claude_home = folder,
             "copilot" => settings.copilot_home = folder,
             "cursor" => settings.cursor_home = folder,
+            "chatgpt" => settings.chatgpt_home = folder,
             _ => settings.codex_home = folder,
         }
         settings = normalize_settings(settings);
@@ -404,11 +455,90 @@ fn open_external(url: String) -> Result<(), String> {
         })
 }
 
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = app;
+        return Ok(unsupported_update_info());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let Some(pubkey) = updater_public_key() else {
+            return Ok(unsupported_update_info());
+        };
+        let endpoint = url::Url::parse(UPDATE_ENDPOINT).map_err(|error| error.to_string())?;
+        let updater = app
+            .updater_builder()
+            .pubkey(pubkey)
+            .endpoints(vec![endpoint])
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        match updater.check().await.map_err(|error| error.to_string())? {
+            Some(update) => Ok(UpdateInfo {
+                supported: true,
+                available: true,
+                current_version: update.current_version,
+                version: Some(update.version),
+                notes: update.body,
+                published_at: update.date.map(|date| date.to_string()),
+            }),
+            None => Ok(UpdateInfo {
+                supported: true,
+                available: false,
+                current_version: current_app_version(),
+                version: None,
+                notes: None,
+                published_at: None,
+            }),
+        }
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = app;
+        return Err("Automatic updates are not supported on this platform.".to_string());
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let Some(pubkey) = updater_public_key() else {
+            return Err("Updater public key is not configured.".to_string());
+        };
+        let endpoint = url::Url::parse(UPDATE_ENDPOINT).map_err(|error| error.to_string())?;
+        let updater = app
+            .updater_builder()
+            .pubkey(pubkey)
+            .endpoints(vec![endpoint])
+            .map_err(|error| error.to_string())?
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+            return Ok(());
+        };
+
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|error| error.to_string())?;
+        app.restart();
+        Ok(())
+    }
+}
+
 fn read_stats_for_provider(settings: &Settings, provider: &str) -> Result<Stats, String> {
     match provider {
         "claude" => read_claude_stats(settings),
         "copilot" => read_copilot_stats(settings),
         "cursor" => read_cursor_stats(settings),
+        "chatgpt" => read_chatgpt_stats(settings),
         _ => read_codex_stats(settings),
     }
 }
@@ -750,6 +880,7 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
             continue;
         };
 
+        let mut previous_total_usage: Option<u64> = None;
         for line in BufReader::new(file).lines().map_while(Result::ok) {
             if !line.contains("\"token_count\"") {
                 continue;
@@ -764,9 +895,6 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
                 continue;
             }
 
-            let Some(usage) = entry.pointer("/payload/info/last_token_usage") else {
-                continue;
-            };
             let timestamp_ms = entry
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -776,22 +904,40 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
                 continue;
             };
 
+            let last_total_tokens = entry
+                .pointer("/payload/info/last_token_usage/total_tokens")
+                .and_then(Value::as_u64);
+            let cumulative_total_tokens = entry
+                .pointer("/payload/info/total_token_usage/total_tokens")
+                .and_then(Value::as_u64);
+            let total_tokens = match cumulative_total_tokens {
+                Some(cumulative) => {
+                    let delta = previous_total_usage
+                        .map(|previous| cumulative.saturating_sub(previous))
+                        .unwrap_or_else(|| last_total_tokens.unwrap_or(cumulative));
+                    previous_total_usage = Some(cumulative);
+                    delta
+                }
+                None => last_total_tokens.unwrap_or(0),
+            };
+            let rate_limits = normalize_rate_limits(
+                entry.pointer("/payload/rate_limits"),
+                timestamp_ms,
+            );
+            if total_tokens == 0 && rate_limits.is_none() {
+                continue;
+            }
+
             events.push(UsageEvent {
                 thread_id: thread.id.clone(),
                 timestamp_ms,
                 model: thread.model.clone(),
-                total_tokens: usage
-                    .get("total_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                total_tokens,
                 plan_type: entry
                     .pointer("/payload/rate_limits/plan_type")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                rate_limits: normalize_rate_limits(
-                    entry.pointer("/payload/rate_limits"),
-                    timestamp_ms,
-                ),
+                rate_limits,
             });
         }
     }
@@ -812,7 +958,7 @@ fn build_stats_from_threads(
         .iter()
         .flat_map(|thread| thread.usage_events.clone())
         .collect();
-    let has_usage_events = !usage_events.is_empty();
+    let has_usage_events = usage_events.iter().any(|event| event.total_tokens > 0);
     let today_start_ms = start_of_local_day_ms(now);
     let period_start_ms = today_start_ms - (chart_days as i64 - 1) * 24 * 60 * 60 * 1000;
     let recent_threshold = now.timestamp_millis() - 7 * 24 * 60 * 60 * 1000;
@@ -1030,7 +1176,7 @@ fn empty_stats(
 }
 
 fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
-    let chart_days = settings.chart_days.clamp(7, 365);
+    let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, state_db, paths) = codex_paths(settings);
 
     if !state_db.exists() {
@@ -1453,7 +1599,7 @@ fn read_claude_account(home: &Path) -> Account {
 }
 
 fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
-    let chart_days = settings.chart_days.clamp(7, 365);
+    let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let home = claude_home(settings);
     let projects_path = home.join("projects");
     let paths = json!({
@@ -1536,6 +1682,99 @@ fn copilot_default_candidates() -> Vec<PathBuf> {
         candidates.push(user_root.join("workspaceStorage"));
     }
     candidates
+}
+
+fn chatgpt_default_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        let app_support = home_dir().join("Library").join("Application Support");
+        candidates.push(app_support.join("com.openai.chat"));
+        candidates.push(app_support.join("ChatGPT"));
+        candidates.push(home_dir().join("Downloads").join("chatgpt-export"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join("AppData").join("Roaming"));
+        candidates.push(appdata.join("com.openai.chat"));
+        candidates.push(appdata.join("ChatGPT"));
+        candidates.push(home_dir().join("Downloads").join("chatgpt-export"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let config = env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir().join(".config"));
+        candidates.push(config.join("com.openai.chat"));
+        candidates.push(config.join("ChatGPT"));
+        candidates.push(home_dir().join("Downloads").join("chatgpt-export"));
+    }
+
+    candidates
+}
+
+fn chatgpt_home(settings: &Settings) -> PathBuf {
+    if !settings.chatgpt_home.trim().is_empty() {
+        return PathBuf::from(&settings.chatgpt_home);
+    }
+    for key in ["AI_USAGE_CHATGPT_HOME", "CHATGPT_HOME"] {
+        if let Ok(value) = env::var(key) {
+            if !value.trim().is_empty() {
+                return PathBuf::from(value);
+            }
+        }
+    }
+
+    let candidates = chatgpt_default_candidates();
+    candidates
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .unwrap_or_else(|| {
+            candidates
+                .first()
+                .cloned()
+                .unwrap_or_else(|| home_dir().join(".chatgpt"))
+        })
+}
+
+fn chatgpt_paths(settings: &Settings) -> (PathBuf, Vec<PathBuf>, Value) {
+    let configured = !settings.chatgpt_home.trim().is_empty()
+        || env::var("AI_USAGE_CHATGPT_HOME")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || env::var("CHATGPT_HOME")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    let home = chatgpt_home(settings);
+    let scan_roots = if configured {
+        vec![home.clone()]
+    } else {
+        let existing = chatgpt_default_candidates()
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect::<Vec<_>>();
+        if existing.is_empty() {
+            vec![home.clone()]
+        } else {
+            existing
+        }
+    };
+
+    let paths = json!({
+      "chatgptHome": home.to_string_lossy(),
+      "scanRoots": scan_roots
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+    });
+
+    (home, scan_roots, paths)
 }
 
 fn copilot_home(settings: &Settings) -> PathBuf {
@@ -1659,6 +1898,10 @@ fn object_timestamp_ms(object: &serde_json::Map<String, Value>) -> Option<i64> {
         "createdAt",
         "updatedAt",
         "lastUpdatedAt",
+        "create_time",
+        "update_time",
+        "created_time",
+        "updated_time",
         "created_at",
         "updated_at",
         "startTime",
@@ -1684,6 +1927,7 @@ fn copilot_text_tokens(value: &Value) -> u64 {
             .get("value")
             .or_else(|| object.get("text"))
             .or_else(|| object.get("content"))
+            .or_else(|| object.get("parts"))
             .map(copilot_text_tokens)
             .unwrap_or(0),
         _ => 0,
@@ -1814,6 +2058,7 @@ fn collect_copilot_usage_events(
                         "user",
                         "system",
                         "copilot",
+                        "chatgpt",
                         "response",
                         "request",
                     ]
@@ -1839,7 +2084,15 @@ fn collect_copilot_usage_events(
                     .unwrap_or(0);
                 let model = object_nested_string(
                     object,
-                    &["model", "modelId", "model_id", "engine", "modelName"],
+                    &[
+                        "model",
+                        "modelId",
+                        "model_id",
+                        "modelSlug",
+                        "model_slug",
+                        "engine",
+                        "modelName",
+                    ],
                 )
                 .unwrap_or(fallback_model)
                 .to_string();
@@ -1930,7 +2183,15 @@ fn read_copilot_values_as_thread(
         .find_map(|value| {
             find_string_deep(
                 value,
-                &["model", "modelId", "model_id", "engine", "modelName"],
+                &[
+                    "model",
+                    "modelId",
+                    "model_id",
+                    "modelSlug",
+                    "model_slug",
+                    "engine",
+                    "modelName",
+                ],
             )
         })
         .unwrap_or_else(|| provider_name.to_string());
@@ -2064,6 +2325,165 @@ fn read_copilot_sqlite_threads(path: &Path) -> Vec<Thread> {
             )
         })
         .collect()
+}
+
+fn read_chatgpt_values_as_thread(
+    path: &Path,
+    values: Vec<Value>,
+    id_suffix: Option<&str>,
+) -> Option<Thread> {
+    read_copilot_values_as_thread(
+        path,
+        values,
+        id_suffix,
+        "ChatGPT",
+        "ChatGPT",
+        "ChatGPT Export",
+    )
+}
+
+fn read_chatgpt_jsonish_file(path: &Path) -> Vec<Thread> {
+    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+        return Vec::new();
+    };
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.len() <= 80 * 1024 * 1024 => metadata,
+        _ => return Vec::new(),
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    if extension.eq_ignore_ascii_case("json") {
+        let Some(value) = serde_json::from_str::<Value>(&content).ok() else {
+            return Vec::new();
+        };
+        if let Value::Array(items) = &value {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if file_name.contains("conversation") || file_name.contains("chat") {
+                return items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        read_chatgpt_values_as_thread(
+                            path,
+                            vec![item.clone()],
+                            Some(&index.to_string()),
+                        )
+                    })
+                    .collect();
+            }
+        }
+        return read_chatgpt_values_as_thread(path, vec![value], None)
+            .into_iter()
+            .collect();
+    }
+
+    let values = content
+        .lines()
+        .filter_map(parse_json_from_line)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return Vec::new();
+    }
+    read_chatgpt_values_as_thread(path, values, None)
+        .into_iter()
+        .map(|mut thread| {
+            if thread.created_at_ms == 0 {
+                thread.created_at_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as i64)
+                    .unwrap_or(0);
+            }
+            thread
+        })
+        .collect()
+}
+
+fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
+    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return Vec::new();
+    };
+    let Ok(mut tables) = connection.prepare(
+        "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(table_rows) = tables.query_map([], |row| row.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+
+    let mut threads = Vec::new();
+    for table in table_rows.filter_map(Result::ok) {
+        if !table
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+        let Ok(mut statement) = connection.prepare(&format!("select * from {table}")) else {
+            continue;
+        };
+        let column_count = statement.column_count();
+        let column_names = statement
+            .column_names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        let Ok(rows) = statement.query_map([], |row| {
+            let mut object = serde_json::Map::new();
+            for index in 0..column_count {
+                let name = column_names
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("column{index}"));
+                if let Ok(value) = row.get::<_, String>(index) {
+                    object.insert(name, Value::String(value));
+                } else if let Ok(value) = row.get::<_, i64>(index) {
+                    object.insert(name, Value::Number(value.into()));
+                }
+            }
+            Ok(Value::Object(object))
+        }) else {
+            continue;
+        };
+
+        for (index, value) in rows.filter_map(Result::ok).enumerate() {
+            let searchable = value.to_string().to_lowercase();
+            if !["chatgpt", "openai", "conversation", "message", "gpt"]
+                .iter()
+                .any(|needle| searchable.contains(needle))
+            {
+                continue;
+            }
+            let parsed_values = if let Some(parsed) = value
+                .as_object()
+                .into_iter()
+                .flat_map(|object| object.values())
+                .filter_map(Value::as_str)
+                .find_map(parse_json_value)
+            {
+                vec![parsed]
+            } else {
+                vec![value]
+            };
+            if let Some(thread) = read_chatgpt_values_as_thread(
+                path,
+                parsed_values,
+                Some(&format!("{table}:{index}")),
+            ) {
+                threads.push(thread);
+            }
+        }
+    }
+
+    threads
 }
 
 fn state_db_candidates(scan_roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -2341,6 +2761,74 @@ fn read_cursor_account(scan_roots: &[PathBuf]) -> Account {
     }
 }
 
+fn read_chatgpt_account(scan_roots: &[PathBuf]) -> Account {
+    let display_keys = [
+        "email",
+        "login",
+        "username",
+        "userName",
+        "displayName",
+        "name",
+    ];
+    let plan_keys = [
+        "plan",
+        "planType",
+        "tier",
+        "subscription",
+        "subscriptionType",
+        "sku",
+    ];
+    let mut display_name: Option<String> = None;
+    let mut plan_type: Option<String> = None;
+
+    for json_path in scan_roots.iter().filter(|path| path.exists()) {
+        let files = if json_path.is_file() {
+            vec![json_path.clone()]
+        } else {
+            WalkDir::new(json_path)
+                .max_depth(4)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.path().to_path_buf())
+                .filter(|path| {
+                    let name = path.to_string_lossy().to_lowercase();
+                    name.ends_with(".json")
+                        && ["account", "profile", "user", "settings", "session", "auth"]
+                            .iter()
+                            .any(|needle| name.contains(needle))
+                })
+                .collect()
+        };
+
+        for file in files {
+            let Ok(content) = fs::read_to_string(file) else {
+                continue;
+            };
+            let Some(parsed) = parse_json_value(&content) else {
+                continue;
+            };
+            if display_name.is_none() {
+                display_name = find_string_deep_ci(&parsed, &display_keys);
+            }
+            if plan_type.is_none() {
+                plan_type = find_string_deep_ci(&parsed, &plan_keys);
+            }
+        }
+    }
+
+    let display_name = display_name.unwrap_or_else(|| "ChatGPT".to_string());
+    let plan_label = format_plan_label("ChatGPT", plan_type.as_deref());
+
+    Account {
+        initials: initials_from_name(&display_name, "CG"),
+        display_name,
+        plan_type,
+        plan_label,
+        plan_monthly_usd: None,
+    }
+}
+
 fn cursor_user_roots() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = home_dir().join("Library").join("Application Support");
@@ -2525,6 +3013,34 @@ fn is_cursor_data_file(path: &Path) -> bool {
         .any(|needle| path_text.contains(needle))
 }
 
+fn is_chatgpt_data_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
+        return true;
+    }
+    if !["json", "jsonl", "log"].contains(&extension.as_str()) {
+        return false;
+    }
+    if file_name == "conversations.json" || file_name == "chat.json" {
+        return true;
+    }
+
+    let path_text = path.to_string_lossy().to_lowercase();
+    ["chatgpt", "openai", "conversation", "message"]
+        .iter()
+        .any(|needle| path_text.contains(needle))
+}
+
 fn is_copilot_data_file(path: &Path) -> bool {
     let file_name = path
         .file_name()
@@ -2546,8 +3062,68 @@ fn is_copilot_data_file(path: &Path) -> bool {
     path_text.contains("copilot") || path_text.contains("chat")
 }
 
+fn read_chatgpt_stats(settings: &Settings) -> Result<Stats, String> {
+    let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
+    let (home, scan_roots, paths) = chatgpt_paths(settings);
+
+    if !scan_roots.iter().any(|path| path.exists()) {
+        return Ok(empty_stats(
+            "ChatGPT",
+            "CG",
+            chart_days,
+            format!("ChatGPT data not found at {}", home.to_string_lossy()),
+            paths,
+        ));
+    }
+
+    let mut threads = Vec::new();
+    for root in scan_roots.iter().filter(|path| path.exists()) {
+        let files = if root.is_file() {
+            vec![root.clone()]
+        } else {
+            WalkDir::new(root)
+                .max_depth(8)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.path().to_path_buf())
+                .collect()
+        };
+
+        for path in files.iter().filter(|path| is_chatgpt_data_file(path)) {
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
+                threads.extend(read_chatgpt_sqlite_threads(path));
+            } else {
+                threads.extend(read_chatgpt_jsonish_file(path));
+            }
+        }
+    }
+
+    let account = read_chatgpt_account(&scan_roots);
+    let pricing = Some(Pricing {
+        label: "ChatGPT local export estimate".to_string(),
+        url: Some("https://chatgpt.com/pricing/".to_string()),
+        checked_at: "2026-07-02".to_string(),
+    });
+
+    Ok(build_stats_from_threads(
+        threads,
+        Local::now(),
+        chart_days,
+        account,
+        pricing,
+        false,
+        paths,
+    ))
+}
+
 fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
-    let chart_days = settings.chart_days.clamp(7, 365);
+    let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = copilot_paths(settings);
 
     if !scan_roots.iter().any(|path| path.exists()) {
@@ -2602,7 +3178,7 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
 }
 
 fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
-    let chart_days = settings.chart_days.clamp(7, 365);
+    let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = cursor_paths(settings);
 
     if !scan_roots.iter().any(|path| path.exists()) {
@@ -2701,6 +3277,16 @@ mod tests {
         assert_eq!(normalized.active_provider, "codex");
     }
 
+    #[test]
+    fn normalize_settings_caps_chart_days() {
+        let mut settings = default_settings();
+        settings.chart_days = MAX_CHART_DAYS + 1;
+
+        let normalized = normalize_settings(settings);
+
+        assert_eq!(normalized.chart_days, MAX_CHART_DAYS);
+    }
+
     fn temp_jsonl_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2736,6 +3322,122 @@ mod tests {
         });
 
         assert_eq!(usage_total(&usage), 100);
+    }
+
+    #[test]
+    fn read_codex_usage_events_uses_cumulative_deltas_and_keeps_latest_limits() {
+        let file_path = temp_jsonl_path("rollout.jsonl");
+        let rows = [
+            json!({
+              "timestamp": "2026-06-30T10:00:00.000Z",
+              "type": "event_msg",
+              "payload": {
+                "type": "token_count",
+                "info": null,
+                "rate_limits": {
+                  "plan_type": "prolite",
+                  "primary": { "used_percent": 12, "window_minutes": 300, "resets_at": 1782833640 }
+                }
+              }
+            }),
+            json!({
+              "timestamp": "2026-06-30T10:01:00.000Z",
+              "type": "event_msg",
+              "payload": {
+                "type": "token_count",
+                "info": {
+                  "total_token_usage": { "total_tokens": 100 },
+                  "last_token_usage": { "total_tokens": 100 }
+                },
+                "rate_limits": {
+                  "plan_type": "prolite",
+                  "primary": { "used_percent": 13, "window_minutes": 300, "resets_at": 1782833640 }
+                }
+              }
+            }),
+            json!({
+              "timestamp": "2026-06-30T10:02:00.000Z",
+              "type": "event_msg",
+              "payload": {
+                "type": "token_count",
+                "info": {
+                  "total_token_usage": { "total_tokens": 100 },
+                  "last_token_usage": { "total_tokens": 100 }
+                },
+                "rate_limits": {
+                  "plan_type": "prolite",
+                  "primary": { "used_percent": 14, "window_minutes": 300, "resets_at": 1782833640 }
+                }
+              }
+            }),
+            json!({
+              "timestamp": "2026-06-30T10:03:00.000Z",
+              "type": "event_msg",
+              "payload": {
+                "type": "token_count",
+                "info": {
+                  "total_token_usage": { "total_tokens": 150 },
+                  "last_token_usage": { "total_tokens": 50 }
+                },
+                "rate_limits": {
+                  "plan_type": "prolite",
+                  "primary": { "used_percent": 15, "window_minutes": 300, "resets_at": 1782833640 }
+                }
+              }
+            }),
+        ];
+        let mut file = File::create(&file_path).expect("test jsonl should be created");
+        for row in rows {
+            writeln!(file, "{row}").expect("test jsonl row should be written");
+        }
+
+        let mut thread = Thread {
+            id: "codex-one".to_string(),
+            title: "Codex rollout".to_string(),
+            source: "Codex".to_string(),
+            model: "gpt-5.5".to_string(),
+            cwd: "/work/app".to_string(),
+            archived: false,
+            tokens_used: 150,
+            created_at_ms: DateTime::parse_from_rfc3339("2026-06-30T09:00:00.000Z")
+                .unwrap()
+                .timestamp_millis(),
+            updated_at_ms: DateTime::parse_from_rfc3339("2026-06-30T10:03:00.000Z")
+                .unwrap()
+                .timestamp_millis(),
+            rollout_path: file_path.to_string_lossy().to_string(),
+            usage_events: Vec::new(),
+        };
+
+        let events = read_codex_usage_events(&[thread.clone()]);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events.iter().map(|event| event.total_tokens).sum::<u64>(), 150);
+        assert_eq!(events[0].total_tokens, 0);
+        assert_eq!(events[1].total_tokens, 100);
+        assert_eq!(events[2].total_tokens, 0);
+        assert_eq!(events[3].total_tokens, 50);
+
+        thread.usage_events = events;
+        let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let stats = build_stats_from_threads(
+            vec![thread],
+            now,
+            30,
+            test_account(),
+            None,
+            true,
+            json!({ "test": true }),
+        );
+
+        assert_eq!(stats.featured.period_tokens, 150);
+        assert_eq!(
+            stats.rate_limits.as_ref().unwrap().windows[0].remaining_percent,
+            85.0
+        );
+
+        let _ = fs::remove_dir_all(file_path.parent().unwrap());
     }
 
     #[test]
@@ -3053,6 +3755,49 @@ mod tests {
     }
 
     #[test]
+    fn read_chatgpt_json_export_uses_content_parts() {
+        let file_path = temp_jsonl_path("conversations.json");
+        let conversation = json!([
+          {
+            "id": "chatgpt-one",
+            "title": "ChatGPT session",
+            "create_time": 1782813600,
+            "update_time": 1782817200,
+            "mapping": {
+              "user-message": {
+                "message": {
+                  "author": { "role": "user" },
+                  "create_time": 1782813600,
+                  "content": { "content_type": "text", "parts": ["Please summarize this repo."] }
+                }
+              },
+              "assistant-message": {
+                "message": {
+                  "author": { "role": "assistant" },
+                  "create_time": 1782817200,
+                  "metadata": { "model_slug": "gpt-5.5" },
+                  "content": { "content_type": "text", "parts": ["Here is a concise summary."] }
+                }
+              }
+            }
+          }
+        ]);
+        let mut file = File::create(&file_path).expect("chatgpt export should be created");
+        write!(file, "{conversation}").expect("chatgpt export should be written");
+
+        let sessions = read_chatgpt_jsonish_file(&file_path);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "chatgpt-one");
+        assert_eq!(sessions[0].title, "ChatGPT session");
+        assert_eq!(sessions[0].source, "ChatGPT");
+        assert!(sessions[0].tokens_used > 0);
+        assert_eq!(sessions[0].usage_events.len(), 2);
+
+        let _ = fs::remove_dir_all(file_path.parent().unwrap());
+    }
+
+    #[test]
     fn read_github_copilot_account_uses_vscode_state() {
         let db_path = temp_jsonl_path("state.vscdb");
         let global_storage = db_path.parent().unwrap().to_path_buf();
@@ -3164,14 +3909,27 @@ mod tests {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(any(windows, target_os = "linux"))]
+    let builder = {
+        let mut builder = builder;
+        if let Some(pubkey) = updater_public_key() {
+            builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
+        }
+        builder
+    };
+
+    builder
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
             get_stats,
             choose_home,
             start_window_drag,
-            open_external
+            open_external,
+            check_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Usage");

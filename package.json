@@ -1,6 +1,6 @@
 {
   "name": "ai-usage",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A cross-platform desktop dashboard for local AI coding usage statistics.",
   "desktopName": "ai-usage",
   "license": "MIT",
@@ -23,8 +23,8 @@
     "icons": "node scripts/generate-icons.js",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "package:mac": "tauri build --bundles app",
-    "package:win": "tauri build --bundles nsis",
-    "package:linux": "tauri build --bundles appimage,deb"
+    "package:win": "tauri build --config src-tauri/tauri.updater.conf.json --bundles nsis",
+    "package:linux": "tauri build --config src-tauri/tauri.updater.conf.json --bundles appimage,deb"
   },
   "dependencies": {},
   "devDependencies": {

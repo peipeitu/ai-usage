@@ -2,12 +2,17 @@ const tauriCore = window.__TAURI__?.core;
 const tauriWindow = window.__TAURI__?.window;
 const REPOSITORY_URL = "https://github.com/peipeitu/ai-usage";
 const ISSUE_URL = "https://github.com/peipeitu/ai-usage/issues";
+const MIN_CHART_DAYS = 7;
+const DEFAULT_CHART_DAYS = 30;
+const MAX_CHART_DAYS = 90;
 const aiUsage = window.aiUsage || {
   platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
   getStats: (provider) => tauriCore.invoke("get_stats", { provider }),
   chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
   getSettings: () => tauriCore.invoke("get_settings"),
   updateSettings: (settings) => tauriCore.invoke("update_settings", { settings }),
+  checkUpdate: () => tauriCore.invoke("check_update"),
+  installUpdate: () => tauriCore.invoke("install_update"),
   openExternal: (url) => tauriCore.invoke("open_external", { url }),
   startWindowDrag: async () => {
     const currentWindow = tauriWindow?.getCurrentWindow?.();
@@ -27,22 +32,33 @@ document.body.dataset.platform = aiUsage.platform || "unknown";
 
 let currentSettings = {
   activeProvider: "codex",
-  enabledProviders: ["codex", "claude", "copilot", "cursor"],
+  enabledProviders: ["codex", "claude", "copilot", "cursor", "chatgpt"],
   codexHome: "",
   claudeHome: "",
   copilotHome: "",
   cursorHome: "",
+  chatgptHome: "",
   language: "auto",
   theme: "system",
   accentColor: "blue",
-  chartDays: 30
+  chartDays: DEFAULT_CHART_DAYS
 };
 let currentView = "home";
 let activeSettingsSectionId = "settingsGeneralSection";
 let lastStats = null;
 let latestStatsRequestId = 0;
 let currentLoading = false;
+let updateInfo = { supported: false, available: false, version: null };
+let updateInstalling = false;
 const statsCache = new Map();
+
+function normalizeChartDays(value, fallback = DEFAULT_CHART_DAYS) {
+  const days = Number(value);
+  if (!Number.isFinite(days)) {
+    return fallback;
+  }
+  return Math.min(MAX_CHART_DAYS, Math.max(MIN_CHART_DAYS, Math.round(days)));
+}
 
 function defaultCopilotHome() {
   if (aiUsage.platform?.includes("win")) {
@@ -62,6 +78,16 @@ function defaultCursorHome() {
     return "~/.config/Cursor/User/globalStorage";
   }
   return "~/Library/Application Support/Cursor/User/globalStorage";
+}
+
+function defaultChatgptHome() {
+  if (aiUsage.platform?.includes("win")) {
+    return "%APPDATA%/com.openai.chat";
+  }
+  if (aiUsage.platform?.includes("linux")) {
+    return "~/.config/com.openai.chat";
+  }
+  return "~/Library/Application Support/com.openai.chat";
 }
 
 const PROVIDERS = {
@@ -84,6 +110,11 @@ const PROVIDERS = {
     label: "Cursor",
     initials: "CU",
     defaultHome: defaultCursorHome()
+  },
+  chatgpt: {
+    label: "ChatGPT",
+    initials: "CG",
+    defaultHome: defaultChatgptHome()
   }
 };
 const PROVIDER_IDS = Object.keys(PROVIDERS);
@@ -125,12 +156,12 @@ const I18N = {
     workspaces: "工作区",
     recentThreads: "最近会话",
     settingsSaved: "已保存",
+    updateAvailable: "更新到 {version}",
+    installingUpdate: "正在更新",
+    installUpdateError: "无法安装更新",
     enabledProviders: "启用 AI 服务",
     atLeastOneProvider: "至少启用一个 AI 服务",
-    codexHome: "Codex 数据目录",
-    claudeHome: "Claude Code 数据目录",
-    copilotHome: "GitHub Copilot 数据目录",
-    cursorHome: "Cursor 数据目录",
+    dataFolder: "数据目录",
     chooseFolder: "选择目录",
     language: "语言",
     followSystem: "跟随系统",
@@ -198,12 +229,12 @@ const I18N = {
     workspaces: "Workspaces",
     recentThreads: "Recent threads",
     settingsSaved: "Saved",
+    updateAvailable: "Update to {version}",
+    installingUpdate: "Updating",
+    installUpdateError: "Unable to install update",
     enabledProviders: "Enabled AI services",
     atLeastOneProvider: "Keep at least one AI service enabled",
-    codexHome: "Codex data folder",
-    claudeHome: "Claude Code data folder",
-    copilotHome: "GitHub Copilot data folder",
-    cursorHome: "Cursor data folder",
+    dataFolder: "Data folder",
     chooseFolder: "Choose folder",
     language: "Language",
     followSystem: "Follow system",
@@ -256,6 +287,7 @@ const elements = {
   settingsClaudeNavLabel: document.getElementById("settingsClaudeNavLabel"),
   settingsCopilotNavLabel: document.getElementById("settingsCopilotNavLabel"),
   settingsCursorNavLabel: document.getElementById("settingsCursorNavLabel"),
+  settingsChatgptNavLabel: document.getElementById("settingsChatgptNavLabel"),
   repositoryLink: document.getElementById("repositoryLink"),
   issueLink: document.getElementById("issueLink"),
   sidebarProviderSection: document.getElementById("sidebarProviderSection"),
@@ -307,28 +339,35 @@ const elements = {
   sourceList: document.getElementById("sourceList"),
   workspaceList: document.getElementById("workspaceList"),
   recentThreads: document.getElementById("recentThreads"),
+  updateButton: document.getElementById("updateButton"),
   refreshButton: document.getElementById("refreshButton"),
   chooseCodexHomeButton: document.getElementById("chooseCodexHomeButton"),
   chooseClaudeHomeButton: document.getElementById("chooseClaudeHomeButton"),
   chooseCopilotHomeButton: document.getElementById("chooseCopilotHomeButton"),
   chooseCursorHomeButton: document.getElementById("chooseCursorHomeButton"),
+  chooseChatgptHomeButton: document.getElementById("chooseChatgptHomeButton"),
   codexHomeValue: document.getElementById("codexHomeValue"),
   claudeHomeValue: document.getElementById("claudeHomeValue"),
   copilotHomeValue: document.getElementById("copilotHomeValue"),
   cursorHomeValue: document.getElementById("cursorHomeValue"),
+  chatgptHomeValue: document.getElementById("chatgptHomeValue"),
   settingsPanelTitle: document.getElementById("settingsPanelTitle"),
   settingsGeneralTitle: document.getElementById("settingsGeneralTitle"),
+  settingsProvidersContentTitle: document.getElementById("settingsProvidersContentTitle"),
   settingsCodexProviderTitle: document.getElementById("settingsCodexProviderTitle"),
   settingsClaudeProviderTitle: document.getElementById("settingsClaudeProviderTitle"),
   settingsCopilotProviderTitle: document.getElementById("settingsCopilotProviderTitle"),
   settingsCursorProviderTitle: document.getElementById("settingsCursorProviderTitle"),
+  settingsChatgptProviderTitle: document.getElementById("settingsChatgptProviderTitle"),
   settingsAppearanceTitle: document.getElementById("settingsAppearanceTitle"),
   settingsChartTitle: document.getElementById("settingsChartTitle"),
   providerEnabledLabels: Array.from(document.querySelectorAll("[data-provider-enabled-label]")),
+  providerToggleLabels: Array.from(document.querySelectorAll("[data-provider-toggle-label]")),
   codexHomeLabel: document.getElementById("codexHomeLabel"),
   claudeHomeLabel: document.getElementById("claudeHomeLabel"),
   copilotHomeLabel: document.getElementById("copilotHomeLabel"),
   cursorHomeLabel: document.getElementById("cursorHomeLabel"),
+  chatgptHomeLabel: document.getElementById("chatgptHomeLabel"),
   languageLabel: document.getElementById("languageLabel"),
   languageSelect: document.getElementById("languageSelect"),
   languageAutoOption: document.getElementById("languageAutoOption"),
@@ -347,6 +386,7 @@ const elements = {
   period90Button: document.getElementById("period90Button"),
   daysSuffix: document.getElementById("daysSuffix"),
   providerButtons: Array.from(document.querySelectorAll(".sidebar-provider [data-provider]")),
+  settingsProviderNavButtons: Array.from(document.querySelectorAll("[data-settings-provider]")),
   enabledProviderInputs: Array.from(document.querySelectorAll("[data-enabled-provider]")),
   settingsNavButtons: Array.from(document.querySelectorAll("[data-settings-section]")),
   themeSelect: document.getElementById("themeSelect"),
@@ -509,6 +549,7 @@ function applyLanguage() {
   elements.settingsClaudeNavLabel.textContent = PROVIDERS.claude.label;
   elements.settingsCopilotNavLabel.textContent = PROVIDERS.copilot.label;
   elements.settingsCursorNavLabel.textContent = PROVIDERS.cursor.label;
+  elements.settingsChatgptNavLabel.textContent = PROVIDERS.chatgpt.label;
   elements.repositoryLink.setAttribute("aria-label", t("repository"));
   elements.repositoryLink.setAttribute("title", t("repository"));
   elements.issueLink.setAttribute("aria-label", t("feedback"));
@@ -518,6 +559,8 @@ function applyLanguage() {
   elements.providerOptions.setAttribute("aria-label", t("aiService"));
   elements.sidebarUsageSection.setAttribute("aria-label", t("periodUsage"));
   elements.sidebarUsageLabel.textContent = t("remainingUsage");
+  elements.updateButton.setAttribute("aria-label", t("updateAvailable", { version: updateInfo.version || "" }).trim());
+  elements.updateButton.setAttribute("title", t("updateAvailable", { version: updateInfo.version || "" }).trim());
   elements.refreshButton.setAttribute("aria-label", t("refresh"));
   elements.refreshButton.setAttribute("title", t("refresh"));
   elements.overviewSourceLabel.textContent = t("dataSource");
@@ -538,23 +581,30 @@ function applyLanguage() {
   elements.recentThreadsTitle.textContent = t("recentThreads");
   elements.settingsPanelTitle.textContent = t("general");
   elements.settingsGeneralTitle.textContent = t("general");
+  elements.settingsProvidersContentTitle.textContent = t("providers");
   elements.settingsCodexProviderTitle.textContent = PROVIDERS.codex.label;
   elements.settingsClaudeProviderTitle.textContent = PROVIDERS.claude.label;
   elements.settingsCopilotProviderTitle.textContent = PROVIDERS.copilot.label;
   elements.settingsCursorProviderTitle.textContent = PROVIDERS.cursor.label;
+  elements.settingsChatgptProviderTitle.textContent = PROVIDERS.chatgpt.label;
   elements.settingsAppearanceTitle.textContent = t("appearance");
   elements.settingsChartTitle.textContent = t("chart");
   for (const label of elements.providerEnabledLabels) {
     label.textContent = t("providerEnabled");
   }
-  elements.codexHomeLabel.textContent = t("codexHome");
-  elements.claudeHomeLabel.textContent = t("claudeHome");
-  elements.copilotHomeLabel.textContent = t("copilotHome");
-  elements.cursorHomeLabel.textContent = t("cursorHome");
+  for (const label of elements.providerToggleLabels) {
+    label.textContent = t("providerEnabled");
+  }
+  elements.codexHomeLabel.textContent = t("dataFolder");
+  elements.claudeHomeLabel.textContent = t("dataFolder");
+  elements.copilotHomeLabel.textContent = t("dataFolder");
+  elements.cursorHomeLabel.textContent = t("dataFolder");
+  elements.chatgptHomeLabel.textContent = t("dataFolder");
   elements.chooseCodexHomeButton.textContent = t("chooseFolder");
   elements.chooseClaudeHomeButton.textContent = t("chooseFolder");
   elements.chooseCopilotHomeButton.textContent = t("chooseFolder");
   elements.chooseCursorHomeButton.textContent = t("chooseFolder");
+  elements.chooseChatgptHomeButton.textContent = t("chooseFolder");
   elements.languageLabel.textContent = t("language");
   elements.languageAutoOption.textContent = t("followSystem");
   elements.languageZhOption.textContent = t("chinese");
@@ -571,6 +621,8 @@ function applyLanguage() {
   elements.period30Button.textContent = t("oneMonth");
   elements.period90Button.textContent = t("threeMonths");
   elements.daysSuffix.textContent = t("daysSuffix");
+  renderProviderVisibility();
+  renderUpdateButton();
   activateSettingsNav(activeSettingsSectionId);
   setView(currentView);
 }
@@ -590,6 +642,18 @@ function applyAccent(accentColor) {
   }
 }
 
+function renderUpdateButton() {
+  const version = updateInfo.version || "";
+  const isSettings = currentView === "settings";
+  const shouldShow = Boolean(updateInfo.supported && updateInfo.available && !isSettings);
+
+  elements.updateButton.hidden = !shouldShow;
+  elements.updateButton.disabled = updateInstalling;
+  elements.updateButton.textContent = updateInstalling ? t("installingUpdate") : t("updateAvailable", { version });
+  elements.updateButton.setAttribute("aria-label", t("updateAvailable", { version }));
+  elements.updateButton.setAttribute("title", t("updateAvailable", { version }));
+}
+
 function setView(view) {
   currentView = view;
   document.body.dataset.view = view;
@@ -602,6 +666,13 @@ function setView(view) {
   elements.settingsButton.classList.toggle("active", isSettings);
   elements.viewEyebrow.textContent = isSettings ? t("preferences") : `${provider.label} ${t("usage")}`;
   elements.viewTitle.textContent = isSettings ? t("settings") : t("overview");
+  renderUpdateButton();
+}
+
+function settingsPanelGroupTitle(sectionId) {
+  return ["settingsGeneralSection", "settingsAppearanceSection", "settingsChartSection"].includes(sectionId)
+    ? t("personal")
+    : t("providers");
 }
 
 function activateSettingsNav(sectionId) {
@@ -609,20 +680,34 @@ function activateSettingsNav(sectionId) {
   for (const button of elements.settingsNavButtons) {
     button.classList.toggle("active", button.dataset.settingsSection === sectionId);
   }
-  const activeButton = elements.settingsNavButtons.find((button) => button.dataset.settingsSection === sectionId);
-  const label = activeButton?.querySelector("span:last-child")?.textContent;
-  if (label) {
-    elements.settingsPanelTitle.textContent = label;
+  elements.settingsPanelTitle.textContent = settingsPanelGroupTitle(sectionId);
+}
+
+function renderProviderVisibility() {
+  for (const button of elements.providerButtons) {
+    const isEnabled = isProviderEnabled(button.dataset.provider);
+    button.hidden = !isEnabled;
+    button.setAttribute("aria-hidden", String(!isEnabled));
+    const isActive = button.dataset.provider === currentSettings.activeProvider;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-checked", String(isActive));
+  }
+
+  for (const button of elements.settingsProviderNavButtons) {
+    const isEnabled = isProviderEnabled(button.dataset.settingsProvider);
+    button.classList.toggle("inactive-provider", !isEnabled);
   }
 }
 
 function setLoading(isLoading) {
   currentLoading = isLoading;
   elements.refreshButton.disabled = isLoading;
+  elements.updateButton.disabled = isLoading || updateInstalling;
   elements.chooseCodexHomeButton.disabled = isLoading || !isProviderEnabled("codex");
   elements.chooseClaudeHomeButton.disabled = isLoading || !isProviderEnabled("claude");
   elements.chooseCopilotHomeButton.disabled = isLoading || !isProviderEnabled("copilot");
   elements.chooseCursorHomeButton.disabled = isLoading || !isProviderEnabled("cursor");
+  elements.chooseChatgptHomeButton.disabled = isLoading || !isProviderEnabled("chatgpt");
   elements.refreshButton.classList.toggle("loading", isLoading);
 }
 
@@ -635,6 +720,7 @@ function providerHome(providerId, settings = currentSettings) {
   if (providerId === "claude") return settings.claudeHome || "";
   if (providerId === "copilot") return settings.copilotHome || "";
   if (providerId === "cursor") return settings.cursorHome || "";
+  if (providerId === "chatgpt") return settings.chatgptHome || "";
   return settings.codexHome || "";
 }
 
@@ -693,9 +779,15 @@ function appendSkeletonRows(container, count, kind = "rank") {
   }
 }
 
+function setChartScale(daysCount) {
+  elements.dailyChart.style.setProperty("--days", daysCount);
+  const gap = daysCount > 180 ? 0 : daysCount > 60 ? 2 : 6;
+  elements.dailyChart.style.setProperty("--chart-gap", `${gap}px`);
+}
+
 function renderChartSkeleton(daysCount) {
   elements.dailyChart.replaceChildren();
-  elements.dailyChart.style.setProperty("--days", daysCount);
+  setChartScale(daysCount);
   for (let index = 0; index < daysCount; index += 1) {
     const column = document.createElement("div");
     column.className = "day-column";
@@ -753,18 +845,16 @@ function renderSettings() {
   elements.claudeHomeValue.textContent = currentSettings.claudeHome || PROVIDERS.claude.defaultHome;
   elements.copilotHomeValue.textContent = currentSettings.copilotHome || PROVIDERS.copilot.defaultHome;
   elements.cursorHomeValue.textContent = currentSettings.cursorHome || PROVIDERS.cursor.defaultHome;
+  elements.chatgptHomeValue.textContent = currentSettings.chatgptHome || PROVIDERS.chatgpt.defaultHome;
   for (const input of elements.enabledProviderInputs) {
     input.checked = isProviderEnabled(input.dataset.enabledProvider);
   }
-  for (const button of elements.providerButtons) {
-    button.hidden = !isProviderEnabled(button.dataset.provider);
-    const isActive = button.dataset.provider === currentSettings.activeProvider;
-    button.classList.toggle("active", isActive);
-    button.setAttribute("aria-checked", String(isActive));
-  }
+  renderProviderVisibility();
   elements.languageSelect.value = currentSettings.language;
   elements.themeSelect.value = currentSettings.theme;
   applyAccent(currentSettings.accentColor);
+  elements.chartDaysInput.min = String(MIN_CHART_DAYS);
+  elements.chartDaysInput.max = String(MAX_CHART_DAYS);
   elements.chartDaysInput.value = currentSettings.chartDays;
   elements.overviewPeriod.textContent = t("daysPeriod", { days: currentSettings.chartDays });
   elements.sidebarPeriodMeta.textContent = t("daysPeriod", { days: currentSettings.chartDays });
@@ -851,7 +941,7 @@ function renderRateLimits(rateLimits) {
 
 function renderDailyChart(days) {
   elements.dailyChart.replaceChildren();
-  elements.dailyChart.style.setProperty("--days", days.length);
+  setChartScale(days.length);
 
   const maxTokens = Math.max(...days.map((day) => day.tokens), 1);
 
@@ -988,7 +1078,7 @@ function renderStats(stats) {
 }
 
 async function refreshStats(options = {}) {
-  const { force = false, preferCache = false } = options;
+  const { force = false, preferCache = false, showLoading = true } = options;
   const providerId = currentSettings.activeProvider;
   const requestId = latestStatsRequestId + 1;
   latestStatsRequestId = requestId;
@@ -1007,7 +1097,9 @@ async function refreshStats(options = {}) {
     renderStatsSkeleton(providerId);
   }
 
-  setLoading(true);
+  if (showLoading) {
+    setLoading(true);
+  }
   try {
     const stats = await aiUsage.getStats(providerId);
     if (requestId !== latestStatsRequestId || providerId !== currentSettings.activeProvider) {
@@ -1022,17 +1114,52 @@ async function refreshStats(options = {}) {
     const provider = PROVIDERS[providerId] || PROVIDERS.codex;
     renderError(error.message || t("readStatsError", { provider: provider.label }));
   } finally {
-    if (requestId === latestStatsRequestId) {
+    if (requestId === latestStatsRequestId && showLoading) {
       setLoading(false);
     }
   }
 }
 
+async function checkForUpdates() {
+  try {
+    updateInfo = await aiUsage.checkUpdate();
+  } catch {
+    updateInfo = { supported: false, available: false, version: null };
+  }
+  renderUpdateButton();
+}
+
+async function installAvailableUpdate() {
+  if (!updateInfo.supported || !updateInfo.available || updateInstalling) {
+    return;
+  }
+
+  updateInstalling = true;
+  renderUpdateButton();
+  setLoading(currentLoading);
+
+  try {
+    await aiUsage.installUpdate();
+  } catch (error) {
+    renderError(error.message || t("installUpdateError"));
+    updateInstalling = false;
+    renderUpdateButton();
+    setLoading(currentLoading);
+  }
+}
+
 async function saveSettings(nextSettings, shouldRefresh = true) {
   const languageChanged = Object.prototype.hasOwnProperty.call(nextSettings, "language");
+  const normalizedNextSettings = { ...nextSettings };
+  if (Object.prototype.hasOwnProperty.call(normalizedNextSettings, "chartDays")) {
+    normalizedNextSettings.chartDays = normalizeChartDays(
+      normalizedNextSettings.chartDays,
+      normalizeChartDays(currentSettings.chartDays)
+    );
+  }
   currentSettings = await aiUsage.updateSettings({
     ...currentSettings,
-    ...nextSettings
+    ...normalizedNextSettings
   });
   renderSettings();
   if (languageChanged && lastStats) {
@@ -1082,6 +1209,7 @@ function openProjectLink(event, url) {
 }
 
 document.addEventListener("pointerdown", startWindowDrag, true);
+elements.updateButton.addEventListener("click", installAvailableUpdate);
 elements.refreshButton.addEventListener("click", () => refreshStats({ force: true }));
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));
@@ -1092,6 +1220,7 @@ elements.chooseCodexHomeButton.addEventListener("click", () => chooseHome("codex
 elements.chooseClaudeHomeButton.addEventListener("click", () => chooseHome("claude"));
 elements.chooseCopilotHomeButton.addEventListener("click", () => chooseHome("copilot"));
 elements.chooseCursorHomeButton.addEventListener("click", () => chooseHome("cursor"));
+elements.chooseChatgptHomeButton.addEventListener("click", () => chooseHome("chatgpt"));
 for (const button of elements.providerButtons) {
   button.addEventListener("click", async () => {
     if (!isProviderEnabled(button.dataset.provider)) return;
@@ -1100,6 +1229,7 @@ for (const button of elements.providerButtons) {
 }
 for (const input of elements.enabledProviderInputs) {
   input.addEventListener("change", async () => {
+    const previousActiveProvider = currentSettings.activeProvider;
     const nextEnabledProviders = elements.enabledProviderInputs
       .filter((providerInput) => providerInput.checked)
       .map((providerInput) => providerInput.dataset.enabledProvider);
@@ -1114,7 +1244,10 @@ for (const input of elements.enabledProviderInputs) {
     if (!nextEnabledProviders.includes(currentSettings.activeProvider)) {
       nextSettings.activeProvider = nextEnabledProviders[0];
     }
-    await saveSettings(nextSettings);
+    await saveSettings(nextSettings, false);
+    if (currentSettings.activeProvider !== previousActiveProvider) {
+      await refreshStats({ preferCache: true, showLoading: false });
+    }
   });
 }
 for (const button of elements.settingsNavButtons) {
@@ -1143,7 +1276,9 @@ for (const button of elements.periodButtons) {
   });
 }
 elements.chartDaysInput.addEventListener("change", async () => {
-  await saveSettings({ chartDays: Number(elements.chartDaysInput.value) });
+  const chartDays = normalizeChartDays(elements.chartDaysInput.value, normalizeChartDays(currentSettings.chartDays));
+  elements.chartDaysInput.value = chartDays;
+  await saveSettings({ chartDays });
 });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   applyTheme(currentSettings.theme);
@@ -1160,7 +1295,7 @@ async function boot() {
   currentSettings = await aiUsage.getSettings();
   renderSettings();
   setView(currentView);
-  await refreshStats({ preferCache: true });
+  await Promise.all([refreshStats({ preferCache: true }), checkForUpdates()]);
 }
 
 boot();

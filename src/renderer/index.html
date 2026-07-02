@@ -29,16 +29,34 @@
           <span id="sidebarProviderLabel">AI 服务</span>
           <div id="providerOptions" class="provider-options compact" role="radiogroup" aria-label="AI 服务">
             <button class="provider-option active" type="button" data-provider="codex" aria-checked="true">
+              <span class="provider-option-logo" aria-hidden="true">
+                <img src="./assets/provider-codex.svg" alt="" />
+              </span>
               <span>Codex</span>
             </button>
             <button class="provider-option" type="button" data-provider="claude" aria-checked="false">
+              <span class="provider-option-logo" aria-hidden="true">
+                <img src="./assets/provider-claude.svg" alt="" />
+              </span>
               <span>Claude Code</span>
             </button>
             <button class="provider-option" type="button" data-provider="copilot" aria-checked="false">
+              <span class="provider-option-logo" aria-hidden="true">
+                <img src="./assets/provider-copilot.svg" alt="" />
+              </span>
               <span>GitHub Copilot</span>
             </button>
             <button class="provider-option" type="button" data-provider="cursor" aria-checked="false">
+              <span class="provider-option-logo" aria-hidden="true">
+                <img src="./assets/provider-cursor.svg" alt="" />
+              </span>
               <span>Cursor</span>
+            </button>
+            <button class="provider-option" type="button" data-provider="chatgpt" aria-checked="false">
+              <span class="provider-option-logo" aria-hidden="true">
+                <img src="./assets/provider-chatgpt.svg" alt="" />
+              </span>
+              <span>ChatGPT</span>
             </button>
           </div>
         </section>
@@ -66,9 +84,12 @@
             <p id="viewEyebrow" class="eyebrow" data-tauri-drag-region>Codex usage</p>
             <h1 id="viewTitle" data-tauri-drag-region>概览</h1>
           </div>
-          <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
-            <span aria-hidden="true">↻</span>
-          </button>
+          <div class="topbar-actions">
+            <button id="updateButton" class="update-button" type="button" hidden>更新</button>
+            <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
+              <span aria-hidden="true">↻</span>
+            </button>
+          </div>
         </header>
 
         <section id="errorPanel" class="error-panel" hidden></section>
@@ -195,21 +216,35 @@
                 </button>
 
                 <span id="settingsProvidersLabel" class="settings-nav-heading">Providers</span>
-                <button class="settings-nav-item" type="button" data-settings-section="settingsCodexProviderSection">
-                  <span aria-hidden="true">⌘</span>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCodexProviderSection" data-settings-provider="codex">
+                  <span class="settings-nav-icon provider-logo" aria-hidden="true">
+                    <img src="./assets/provider-codex.svg" alt="" />
+                  </span>
                   <span id="settingsCodexNavLabel">Codex</span>
                 </button>
-                <button class="settings-nav-item" type="button" data-settings-section="settingsClaudeProviderSection">
-                  <span aria-hidden="true">◌</span>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsClaudeProviderSection" data-settings-provider="claude">
+                  <span class="settings-nav-icon provider-logo" aria-hidden="true">
+                    <img src="./assets/provider-claude.svg" alt="" />
+                  </span>
                   <span id="settingsClaudeNavLabel">Claude Code</span>
                 </button>
-                <button class="settings-nav-item" type="button" data-settings-section="settingsCopilotProviderSection">
-                  <span aria-hidden="true">◇</span>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCopilotProviderSection" data-settings-provider="copilot">
+                  <span class="settings-nav-icon provider-logo" aria-hidden="true">
+                    <img src="./assets/provider-copilot.svg" alt="" />
+                  </span>
                   <span id="settingsCopilotNavLabel">GitHub Copilot</span>
                 </button>
-                <button class="settings-nav-item" type="button" data-settings-section="settingsCursorProviderSection">
-                  <span aria-hidden="true">▣</span>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCursorProviderSection" data-settings-provider="cursor">
+                  <span class="settings-nav-icon provider-logo" aria-hidden="true">
+                    <img src="./assets/provider-cursor.svg" alt="" />
+                  </span>
                   <span id="settingsCursorNavLabel">Cursor</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsChatgptProviderSection" data-settings-provider="chatgpt">
+                  <span class="settings-nav-icon provider-logo" aria-hidden="true">
+                    <img src="./assets/provider-chatgpt.svg" alt="" />
+                  </span>
+                  <span id="settingsChatgptNavLabel">ChatGPT</span>
                 </button>
               </nav>
 
@@ -247,7 +282,7 @@
 
             <div class="settings-content">
               <header class="settings-content-header">
-                <h2 id="settingsPanelTitle">常规</h2>
+                <h2 id="settingsPanelTitle" class="settings-primary-heading">常规</h2>
                 <span id="settingsStatus">-</span>
               </header>
 
@@ -311,13 +346,15 @@
                           <button id="period90Button" type="button" data-days="90">三个月</button>
                         </div>
                         <label class="days-input">
-                          <input id="chartDaysInput" type="number" min="7" max="365" step="1" />
+                          <input id="chartDaysInput" type="number" min="7" max="90" step="1" />
                           <span id="daysSuffix">天</span>
                         </label>
                       </div>
                     </label>
                   </div>
                 </section>
+
+                <div class="settings-group-title settings-primary-heading" id="settingsProvidersContentTitle">Providers</div>
 
                 <section id="settingsCodexProviderSection" class="settings-section">
                   <div class="settings-section-heading">
@@ -328,11 +365,11 @@
                       <span data-provider-enabled-label>启用</span>
                       <label class="toggle-item provider-toggle">
                         <input id="enableCodexInput" type="checkbox" data-enabled-provider="codex" />
-                        <span>Codex</span>
+                        <span data-provider-toggle-label>启用</span>
                       </label>
                     </div>
                     <label class="setting-row">
-                      <span id="codexHomeLabel">Codex 数据目录</span>
+                      <span id="codexHomeLabel">数据目录</span>
                       <div class="setting-control folder-control">
                         <code id="codexHomeValue">-</code>
                         <button id="chooseCodexHomeButton" class="secondary-button" type="button">选择目录</button>
@@ -350,11 +387,11 @@
                       <span data-provider-enabled-label>启用</span>
                       <label class="toggle-item provider-toggle">
                         <input id="enableClaudeInput" type="checkbox" data-enabled-provider="claude" />
-                        <span>Claude Code</span>
+                        <span data-provider-toggle-label>启用</span>
                       </label>
                     </div>
                     <label class="setting-row">
-                      <span id="claudeHomeLabel">Claude Code 数据目录</span>
+                      <span id="claudeHomeLabel">数据目录</span>
                       <div class="setting-control folder-control">
                         <code id="claudeHomeValue">-</code>
                         <button id="chooseClaudeHomeButton" class="secondary-button" type="button">选择目录</button>
@@ -372,11 +409,11 @@
                       <span data-provider-enabled-label>启用</span>
                       <label class="toggle-item provider-toggle">
                         <input id="enableCopilotInput" type="checkbox" data-enabled-provider="copilot" />
-                        <span>GitHub Copilot</span>
+                        <span data-provider-toggle-label>启用</span>
                       </label>
                     </div>
                     <label class="setting-row">
-                      <span id="copilotHomeLabel">GitHub Copilot 数据目录</span>
+                      <span id="copilotHomeLabel">数据目录</span>
                       <div class="setting-control folder-control">
                         <code id="copilotHomeValue">-</code>
                         <button id="chooseCopilotHomeButton" class="secondary-button" type="button">选择目录</button>
@@ -394,14 +431,36 @@
                       <span data-provider-enabled-label>启用</span>
                       <label class="toggle-item provider-toggle">
                         <input id="enableCursorInput" type="checkbox" data-enabled-provider="cursor" />
-                        <span>Cursor</span>
+                        <span data-provider-toggle-label>启用</span>
                       </label>
                     </div>
                     <label class="setting-row">
-                      <span id="cursorHomeLabel">Cursor 数据目录</span>
+                      <span id="cursorHomeLabel">数据目录</span>
                       <div class="setting-control folder-control">
                         <code id="cursorHomeValue">-</code>
                         <button id="chooseCursorHomeButton" class="secondary-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsChatgptProviderSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsChatgptProviderTitle">ChatGPT</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span data-provider-enabled-label>启用</span>
+                      <label class="toggle-item provider-toggle">
+                        <input id="enableChatgptInput" type="checkbox" data-enabled-provider="chatgpt" />
+                        <span data-provider-toggle-label>启用</span>
+                      </label>
+                    </div>
+                    <label class="setting-row">
+                      <span id="chatgptHomeLabel">数据目录</span>
+                      <div class="setting-control folder-control">
+                        <code id="chatgptHomeValue">-</code>
+                        <button id="chooseChatgptHomeButton" class="secondary-button" type="button">选择目录</button>
                       </div>
                     </label>
                   </div>

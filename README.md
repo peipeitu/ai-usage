@@ -25,12 +25,17 @@ AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding u
   - Reads local Cursor editor storage from `AI_USAGE_CURSOR_HOME` or `CURSOR_HOME` when set.
   - Defaults to Cursor global storage, such as `~/Library/Application Support/Cursor/User/globalStorage` on macOS.
   - Aggregates recognized local Cursor chat/composer usage fields and falls back to text-length token estimates when explicit token usage is unavailable.
+- ChatGPT
+  - Reads local ChatGPT data from `AI_USAGE_CHATGPT_HOME` or `CHATGPT_HOME` when set.
+  - Defaults to common ChatGPT desktop app storage, such as `~/Library/Application Support/com.openai.chat` on macOS.
+  - Can also read ChatGPT export folders that include `conversations.json`.
+  - Aggregates recognized local/exported conversation fields and falls back to text-length token estimates when explicit token usage is unavailable.
 
 ## Current Scope
 
-- Supports macOS, Windows, and Linux through Tauri.
+- Supports Windows and Linux release packages through Tauri. macOS can be built locally, but no macOS release package is published yet.
 - Uses a local desktop dashboard with a sidebar provider switch.
-- Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, theme, accent color, and chart period.
+- Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, ChatGPT directory, theme, accent color, and chart period.
 - Defaults to a 30-day chart period.
 - No tray integration yet.
 
@@ -61,29 +66,33 @@ Build all artifacts from the repository root after installing dependencies.
 
 ### macOS
 
+No macOS package is published for now. macOS distribution needs a Developer ID certificate, signing, and notarization to avoid Gatekeeper warnings, and the updater flow also needs a separate signed macOS artifact.
+
+For local self-use, you can still build an unsigned app on your own Mac:
+
 ```sh
 npm run package:mac
 ```
 
-Outputs:
+Output:
 
 - `src-tauri/target/release/bundle/macos/AI Usage.app`
 
-Install from the app bundle:
+Install from the local app bundle:
 
 ```sh
 cp -R "src-tauri/target/release/bundle/macos/AI Usage.app" /Applications/
 open "/Applications/AI Usage.app"
 ```
 
-For unsigned local test builds, macOS may show "damaged" or block the app. You can clear the quarantine attribute for a trusted local build:
+If macOS blocks a trusted local build, clear the quarantine attribute:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/AI Usage.app"
 open "/Applications/AI Usage.app"
 ```
 
-For normal distribution to other users, sign with a Developer ID certificate and notarize the app.
+This local build command is not used for release publishing.
 
 ### Windows
 
@@ -94,6 +103,7 @@ npm run package:win
 Output:
 
 - `src-tauri/target/release/bundle/nsis/AI Usage_<version>_<arch>-setup.exe`
+- `src-tauri/target/release/bundle/nsis/AI Usage_<version>_<arch>-setup.exe.sig`
 
 Install:
 
@@ -101,7 +111,9 @@ Install:
 2. Follow the installer prompts.
 3. Launch `AI Usage` from the Start menu or desktop shortcut.
 
-Unsigned Windows builds may show a SmartScreen warning. Users can continue manually for trusted test builds.
+The `.sig` file is used by the in-app updater to verify Windows updates. It is generated when `TAURI_SIGNING_PRIVATE_KEY` is set.
+
+Unsigned Windows builds may show a SmartScreen warning. Use an Authenticode code-signing certificate in CI or your local certificate store for public distribution.
 
 ### Linux
 
@@ -112,19 +124,54 @@ npm run package:linux
 Outputs:
 
 - `src-tauri/target/release/bundle/appimage/ai-usage_<version>_<arch>.AppImage`
+- `src-tauri/target/release/bundle/appimage/ai-usage_<version>_<arch>.AppImage.sig`
 - `src-tauri/target/release/bundle/deb/ai-usage_<version>_<arch>.deb`
 
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.2_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.2_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.3_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.3_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.2_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.3_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.
+
+### Auto Updates
+
+Automatic updates are enabled only for Windows and Linux release builds. macOS is intentionally not wired to the updater or release packaging yet.
+
+Generate updater signing keys once:
+
+```sh
+npm run tauri signer generate -- -w ~/.tauri/ai-usage.key
+```
+
+Keep the private key secret. Build Windows or Linux releases with the public key embedded and the private key available for artifact signing:
+
+```sh
+export AI_USAGE_UPDATER_PUBLIC_KEY="content of the generated public key"
+export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/ai-usage.key"
+npm run package:linux
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:AI_USAGE_UPDATER_PUBLIC_KEY="content of the generated public key"
+$env:TAURI_SIGNING_PRIVATE_KEY="C:\Users\you\.tauri\ai-usage.key"
+npm run package:win
+```
+
+The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Publish a `latest.json` release asset containing Windows and Linux platform entries only, with each `signature` value copied from the generated `.sig` file.
+
+Linux AppImage GPG signing is optional and separate from the updater signature:
+
+```sh
+SIGN=1 SIGN_KEY="your-gpg-key-id" APPIMAGETOOL_FORCE_SIGN=1 npm run package:linux
+```
