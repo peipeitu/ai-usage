@@ -529,7 +529,6 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         app.restart();
-        Ok(())
     }
 }
 

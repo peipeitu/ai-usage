@@ -23,8 +23,10 @@
     "icons": "node scripts/generate-icons.js",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "package:mac": "tauri build --bundles app",
-    "package:win": "tauri build --config src-tauri/tauri.updater.conf.json --bundles nsis",
-    "package:linux": "tauri build --config src-tauri/tauri.updater.conf.json --bundles appimage,deb"
+    "package:win": "node scripts/write-updater-config.js && tauri build --config src-tauri/tauri.updater.generated.conf.json --bundles nsis",
+    "package:win:unsigned": "tauri build --bundles nsis",
+    "package:linux": "node scripts/write-updater-config.js && tauri build --config src-tauri/tauri.updater.generated.conf.json --bundles appimage,deb",
+    "package:linux:unsigned": "tauri build --bundles appimage,deb"
   },
   "dependencies": {},
   "devDependencies": {

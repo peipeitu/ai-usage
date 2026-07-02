@@ -2,6 +2,7 @@ node_modules/
 dist/
 release/
 src-tauri/gen/
+src-tauri/tauri.updater.generated.conf.json
 src-tauri/target/
 *.log
 .DS_Store
