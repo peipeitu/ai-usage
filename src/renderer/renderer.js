@@ -27,15 +27,42 @@ document.body.dataset.platform = aiUsage.platform || "unknown";
 
 let currentSettings = {
   activeProvider: "codex",
+  enabledProviders: ["codex", "claude", "copilot", "cursor"],
   codexHome: "",
   claudeHome: "",
+  copilotHome: "",
+  cursorHome: "",
   language: "auto",
   theme: "system",
   accentColor: "blue",
   chartDays: 30
 };
 let currentView = "home";
+let activeSettingsSectionId = "settingsGeneralSection";
 let lastStats = null;
+let latestStatsRequestId = 0;
+let currentLoading = false;
+const statsCache = new Map();
+
+function defaultCopilotHome() {
+  if (aiUsage.platform?.includes("win")) {
+    return "%APPDATA%/Code/User/globalStorage/github.copilot-chat";
+  }
+  if (aiUsage.platform?.includes("linux")) {
+    return "~/.config/Code/User/globalStorage/github.copilot-chat";
+  }
+  return "~/Library/Application Support/Code/User/globalStorage/github.copilot-chat";
+}
+
+function defaultCursorHome() {
+  if (aiUsage.platform?.includes("win")) {
+    return "%APPDATA%/Cursor/User/globalStorage";
+  }
+  if (aiUsage.platform?.includes("linux")) {
+    return "~/.config/Cursor/User/globalStorage";
+  }
+  return "~/Library/Application Support/Cursor/User/globalStorage";
+}
 
 const PROVIDERS = {
   codex: {
@@ -47,8 +74,19 @@ const PROVIDERS = {
     label: "Claude Code",
     initials: "CC",
     defaultHome: "~/.claude"
+  },
+  copilot: {
+    label: "GitHub Copilot",
+    initials: "GH",
+    defaultHome: defaultCopilotHome()
+  },
+  cursor: {
+    label: "Cursor",
+    initials: "CU",
+    defaultHome: defaultCursorHome()
   }
 };
+const PROVIDER_IDS = Object.keys(PROVIDERS);
 
 const I18N = {
   zh: {
@@ -57,6 +95,13 @@ const I18N = {
     overview: "概览",
     settings: "设置",
     preferences: "偏好设置",
+    backToApp: "返回应用",
+    personal: "个人",
+    providers: "Providers",
+    general: "常规",
+    appearance: "个性化",
+    chart: "图表",
+    providerEnabled: "启用",
     repository: "仓库",
     feedback: "反馈",
     refresh: "刷新",
@@ -80,8 +125,12 @@ const I18N = {
     workspaces: "工作区",
     recentThreads: "最近会话",
     settingsSaved: "已保存",
+    enabledProviders: "启用 AI 服务",
+    atLeastOneProvider: "至少启用一个 AI 服务",
     codexHome: "Codex 数据目录",
     claudeHome: "Claude Code 数据目录",
+    copilotHome: "GitHub Copilot 数据目录",
+    cursorHome: "Cursor 数据目录",
     chooseFolder: "选择目录",
     language: "语言",
     followSystem: "跟随系统",
@@ -119,6 +168,13 @@ const I18N = {
     overview: "Overview",
     settings: "Settings",
     preferences: "Preferences",
+    backToApp: "Back to app",
+    personal: "Personal",
+    providers: "Providers",
+    general: "General",
+    appearance: "Personalization",
+    chart: "Chart",
+    providerEnabled: "Enabled",
     repository: "GitHub",
     feedback: "Feedback",
     refresh: "Refresh",
@@ -142,8 +198,12 @@ const I18N = {
     workspaces: "Workspaces",
     recentThreads: "Recent threads",
     settingsSaved: "Saved",
+    enabledProviders: "Enabled AI services",
+    atLeastOneProvider: "Keep at least one AI service enabled",
     codexHome: "Codex data folder",
     claudeHome: "Claude Code data folder",
+    copilotHome: "GitHub Copilot data folder",
+    cursorHome: "Cursor data folder",
     chooseFolder: "Choose folder",
     language: "Language",
     followSystem: "Follow system",
@@ -185,6 +245,17 @@ const elements = {
   settingsView: document.getElementById("settingsView"),
   homeButton: document.getElementById("homeButton"),
   settingsButton: document.getElementById("settingsButton"),
+  settingsBackButton: document.getElementById("settingsBackButton"),
+  settingsBackLabel: document.getElementById("settingsBackLabel"),
+  settingsPersonalLabel: document.getElementById("settingsPersonalLabel"),
+  settingsProvidersLabel: document.getElementById("settingsProvidersLabel"),
+  settingsGeneralNavLabel: document.getElementById("settingsGeneralNavLabel"),
+  settingsAppearanceNavLabel: document.getElementById("settingsAppearanceNavLabel"),
+  settingsChartNavLabel: document.getElementById("settingsChartNavLabel"),
+  settingsCodexNavLabel: document.getElementById("settingsCodexNavLabel"),
+  settingsClaudeNavLabel: document.getElementById("settingsClaudeNavLabel"),
+  settingsCopilotNavLabel: document.getElementById("settingsCopilotNavLabel"),
+  settingsCursorNavLabel: document.getElementById("settingsCursorNavLabel"),
   repositoryLink: document.getElementById("repositoryLink"),
   issueLink: document.getElementById("issueLink"),
   sidebarProviderSection: document.getElementById("sidebarProviderSection"),
@@ -239,11 +310,25 @@ const elements = {
   refreshButton: document.getElementById("refreshButton"),
   chooseCodexHomeButton: document.getElementById("chooseCodexHomeButton"),
   chooseClaudeHomeButton: document.getElementById("chooseClaudeHomeButton"),
+  chooseCopilotHomeButton: document.getElementById("chooseCopilotHomeButton"),
+  chooseCursorHomeButton: document.getElementById("chooseCursorHomeButton"),
   codexHomeValue: document.getElementById("codexHomeValue"),
   claudeHomeValue: document.getElementById("claudeHomeValue"),
+  copilotHomeValue: document.getElementById("copilotHomeValue"),
+  cursorHomeValue: document.getElementById("cursorHomeValue"),
   settingsPanelTitle: document.getElementById("settingsPanelTitle"),
+  settingsGeneralTitle: document.getElementById("settingsGeneralTitle"),
+  settingsCodexProviderTitle: document.getElementById("settingsCodexProviderTitle"),
+  settingsClaudeProviderTitle: document.getElementById("settingsClaudeProviderTitle"),
+  settingsCopilotProviderTitle: document.getElementById("settingsCopilotProviderTitle"),
+  settingsCursorProviderTitle: document.getElementById("settingsCursorProviderTitle"),
+  settingsAppearanceTitle: document.getElementById("settingsAppearanceTitle"),
+  settingsChartTitle: document.getElementById("settingsChartTitle"),
+  providerEnabledLabels: Array.from(document.querySelectorAll("[data-provider-enabled-label]")),
   codexHomeLabel: document.getElementById("codexHomeLabel"),
   claudeHomeLabel: document.getElementById("claudeHomeLabel"),
+  copilotHomeLabel: document.getElementById("copilotHomeLabel"),
+  cursorHomeLabel: document.getElementById("cursorHomeLabel"),
   languageLabel: document.getElementById("languageLabel"),
   languageSelect: document.getElementById("languageSelect"),
   languageAutoOption: document.getElementById("languageAutoOption"),
@@ -261,7 +346,9 @@ const elements = {
   period30Button: document.getElementById("period30Button"),
   period90Button: document.getElementById("period90Button"),
   daysSuffix: document.getElementById("daysSuffix"),
-  providerButtons: Array.from(document.querySelectorAll("[data-provider]")),
+  providerButtons: Array.from(document.querySelectorAll(".sidebar-provider [data-provider]")),
+  enabledProviderInputs: Array.from(document.querySelectorAll("[data-enabled-provider]")),
+  settingsNavButtons: Array.from(document.querySelectorAll("[data-settings-section]")),
   themeSelect: document.getElementById("themeSelect"),
   accentButtons: Array.from(document.querySelectorAll("[data-accent]")),
   periodButtons: Array.from(document.querySelectorAll("[data-days]")),
@@ -278,6 +365,20 @@ function currentLanguage() {
   return currentSettings.language === "zh" || currentSettings.language === "en"
     ? currentSettings.language
     : systemLanguage();
+}
+
+function enabledProviders(settings = currentSettings) {
+  const enabled = Array.isArray(settings.enabledProviders) ? settings.enabledProviders : PROVIDER_IDS;
+  const normalized = enabled.filter((provider) => PROVIDER_IDS.includes(provider));
+  return normalized.length ? normalized : [...PROVIDER_IDS];
+}
+
+function isProviderEnabled(providerId, settings = currentSettings) {
+  return enabledProviders(settings).includes(providerId);
+}
+
+function firstEnabledProvider(settings = currentSettings) {
+  return enabledProviders(settings)[0] || "codex";
 }
 
 function localeForLanguage() {
@@ -367,6 +468,11 @@ function formatLimitLabel(limit) {
   return currentLanguage() === "zh" ? `${minutes} 分钟` : `${minutes} minutes`;
 }
 
+function formatLimitMeta(limit) {
+  const label = formatLimitLabel(limit);
+  return limit?.resetsAt ? t("resetAt", { label, time: formatResetTime(limit) }) : label;
+}
+
 function displaySourceName(name) {
   if (name === "子任务" || name === "Subtask") return t("subtask");
   if (!name || name === "Unknown") return t("unknown");
@@ -393,8 +499,20 @@ function applyLanguage() {
   elements.primaryNav.setAttribute("aria-label", t("primaryNavigation"));
   elements.homeButton.textContent = t("overview");
   elements.settingsButton.textContent = t("settings");
-  elements.repositoryLink.textContent = t("repository");
-  elements.issueLink.textContent = t("feedback");
+  elements.settingsBackLabel.textContent = t("backToApp");
+  elements.settingsPersonalLabel.textContent = t("personal");
+  elements.settingsProvidersLabel.textContent = t("providers");
+  elements.settingsGeneralNavLabel.textContent = t("general");
+  elements.settingsAppearanceNavLabel.textContent = t("appearance");
+  elements.settingsChartNavLabel.textContent = t("chart");
+  elements.settingsCodexNavLabel.textContent = PROVIDERS.codex.label;
+  elements.settingsClaudeNavLabel.textContent = PROVIDERS.claude.label;
+  elements.settingsCopilotNavLabel.textContent = PROVIDERS.copilot.label;
+  elements.settingsCursorNavLabel.textContent = PROVIDERS.cursor.label;
+  elements.repositoryLink.setAttribute("aria-label", t("repository"));
+  elements.repositoryLink.setAttribute("title", t("repository"));
+  elements.issueLink.setAttribute("aria-label", t("feedback"));
+  elements.issueLink.setAttribute("title", t("feedback"));
   elements.sidebarProviderSection.setAttribute("aria-label", t("aiService"));
   elements.sidebarProviderLabel.textContent = t("aiService");
   elements.providerOptions.setAttribute("aria-label", t("aiService"));
@@ -418,11 +536,25 @@ function applyLanguage() {
   elements.sourceTitle.textContent = t("sources");
   elements.workspaceTitle.textContent = t("workspaces");
   elements.recentThreadsTitle.textContent = t("recentThreads");
-  elements.settingsPanelTitle.textContent = t("settings");
+  elements.settingsPanelTitle.textContent = t("general");
+  elements.settingsGeneralTitle.textContent = t("general");
+  elements.settingsCodexProviderTitle.textContent = PROVIDERS.codex.label;
+  elements.settingsClaudeProviderTitle.textContent = PROVIDERS.claude.label;
+  elements.settingsCopilotProviderTitle.textContent = PROVIDERS.copilot.label;
+  elements.settingsCursorProviderTitle.textContent = PROVIDERS.cursor.label;
+  elements.settingsAppearanceTitle.textContent = t("appearance");
+  elements.settingsChartTitle.textContent = t("chart");
+  for (const label of elements.providerEnabledLabels) {
+    label.textContent = t("providerEnabled");
+  }
   elements.codexHomeLabel.textContent = t("codexHome");
   elements.claudeHomeLabel.textContent = t("claudeHome");
+  elements.copilotHomeLabel.textContent = t("copilotHome");
+  elements.cursorHomeLabel.textContent = t("cursorHome");
   elements.chooseCodexHomeButton.textContent = t("chooseFolder");
   elements.chooseClaudeHomeButton.textContent = t("chooseFolder");
+  elements.chooseCopilotHomeButton.textContent = t("chooseFolder");
+  elements.chooseCursorHomeButton.textContent = t("chooseFolder");
   elements.languageLabel.textContent = t("language");
   elements.languageAutoOption.textContent = t("followSystem");
   elements.languageZhOption.textContent = t("chinese");
@@ -439,6 +571,7 @@ function applyLanguage() {
   elements.period30Button.textContent = t("oneMonth");
   elements.period90Button.textContent = t("threeMonths");
   elements.daysSuffix.textContent = t("daysSuffix");
+  activateSettingsNav(activeSettingsSectionId);
   setView(currentView);
 }
 
@@ -459,6 +592,7 @@ function applyAccent(accentColor) {
 
 function setView(view) {
   currentView = view;
+  document.body.dataset.view = view;
   const isSettings = view === "settings";
   const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
   elements.homeView.hidden = isSettings;
@@ -470,10 +604,25 @@ function setView(view) {
   elements.viewTitle.textContent = isSettings ? t("settings") : t("overview");
 }
 
+function activateSettingsNav(sectionId) {
+  activeSettingsSectionId = sectionId;
+  for (const button of elements.settingsNavButtons) {
+    button.classList.toggle("active", button.dataset.settingsSection === sectionId);
+  }
+  const activeButton = elements.settingsNavButtons.find((button) => button.dataset.settingsSection === sectionId);
+  const label = activeButton?.querySelector("span:last-child")?.textContent;
+  if (label) {
+    elements.settingsPanelTitle.textContent = label;
+  }
+}
+
 function setLoading(isLoading) {
+  currentLoading = isLoading;
   elements.refreshButton.disabled = isLoading;
-  elements.chooseCodexHomeButton.disabled = isLoading;
-  elements.chooseClaudeHomeButton.disabled = isLoading;
+  elements.chooseCodexHomeButton.disabled = isLoading || !isProviderEnabled("codex");
+  elements.chooseClaudeHomeButton.disabled = isLoading || !isProviderEnabled("claude");
+  elements.chooseCopilotHomeButton.disabled = isLoading || !isProviderEnabled("copilot");
+  elements.chooseCursorHomeButton.disabled = isLoading || !isProviderEnabled("cursor");
   elements.refreshButton.classList.toggle("loading", isLoading);
 }
 
@@ -482,11 +631,133 @@ function renderError(message) {
   elements.errorPanel.textContent = message || "";
 }
 
+function providerHome(providerId, settings = currentSettings) {
+  if (providerId === "claude") return settings.claudeHome || "";
+  if (providerId === "copilot") return settings.copilotHome || "";
+  if (providerId === "cursor") return settings.cursorHome || "";
+  return settings.codexHome || "";
+}
+
+function statsCacheKey(providerId = currentSettings.activeProvider, settings = currentSettings) {
+  return [providerId, settings.chartDays || 30, providerHome(providerId, settings)].join("\u001f");
+}
+
+function cacheStats(providerId, stats, settings = currentSettings) {
+  statsCache.set(statsCacheKey(providerId, settings), stats);
+}
+
+function cachedStats(providerId = currentSettings.activeProvider, settings = currentSettings) {
+  return statsCache.get(statsCacheKey(providerId, settings)) || null;
+}
+
+function clearSkeletons() {
+  for (const node of document.querySelectorAll(".skeleton-line, .skeleton-block")) {
+    node.classList.remove("skeleton-line", "skeleton-block");
+    node.style.removeProperty("--skeleton-width");
+  }
+}
+
+function markSkeleton(element, width = "72%") {
+  element.textContent = "";
+  element.classList.add("skeleton-line");
+  element.style.setProperty("--skeleton-width", width);
+}
+
+function appendSkeletonRows(container, count, kind = "rank") {
+  container.replaceChildren();
+  for (let index = 0; index < count; index += 1) {
+    const row = document.createElement("div");
+    row.className = kind === "thread" ? "thread-row" : "rank-row";
+
+    if (kind === "thread") {
+      const main = document.createElement("div");
+      const title = document.createElement("strong");
+      const meta = document.createElement("span");
+      markSkeleton(title, `${68 - index * 4}%`);
+      markSkeleton(meta, `${52 - index * 3}%`);
+      main.append(title, meta);
+      const value = document.createElement("span");
+      markSkeleton(value, "42px");
+      row.append(main, value);
+    } else {
+      const label = document.createElement("span");
+      label.className = "rank-label";
+      const value = document.createElement("span");
+      value.className = "rank-value";
+      markSkeleton(label, `${64 - index * 5}%`);
+      markSkeleton(value, "38px");
+      row.append(label, value);
+    }
+
+    container.append(row);
+  }
+}
+
+function renderChartSkeleton(daysCount) {
+  elements.dailyChart.replaceChildren();
+  elements.dailyChart.style.setProperty("--days", daysCount);
+  for (let index = 0; index < daysCount; index += 1) {
+    const column = document.createElement("div");
+    column.className = "day-column";
+    const bar = document.createElement("div");
+    bar.className = "day-bar skeleton-block";
+    bar.style.height = `${18 + ((index * 17) % 54)}%`;
+    column.append(bar);
+    elements.dailyChart.append(column);
+  }
+}
+
+function renderStatsSkeleton(providerId = currentSettings.activeProvider) {
+  clearSkeletons();
+  renderError(null);
+
+  const provider = PROVIDERS[providerId] || PROVIDERS.codex;
+  const chartDays = currentSettings.chartDays || 30;
+  elements.overviewProvider.textContent = provider.label;
+  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
+  elements.overviewPeriod.textContent = t("daysPeriod", { days: chartDays });
+  elements.accountInitials.textContent = provider.initials;
+  elements.accountName.textContent = provider.label;
+  markSkeleton(elements.accountPlan, "64px");
+  markSkeleton(elements.todayCost, "86px");
+  markSkeleton(elements.periodCost, "86px");
+  markSkeleton(elements.periodUsagePercent, "110px");
+  markSkeleton(elements.periodTokens, "78px");
+  markSkeleton(elements.latestTokenUsage, "72px");
+  markSkeleton(elements.threadsTotal, "48px");
+  markSkeleton(elements.threadsActive, "48px");
+  markSkeleton(elements.tokensTotal, "64px");
+  markSkeleton(elements.updatedThisWeek, "48px");
+  markSkeleton(elements.sidebarRemainingUsage, "46px");
+  markSkeleton(elements.sidebarPeriodMeta, "116px");
+  markSkeleton(elements.lastUpdated, "118px");
+  markSkeleton(elements.rateLimitUpdated, "94px");
+
+  renderChartSkeleton(chartDays);
+  appendSkeletonRows(elements.rateLimitList, 2);
+  appendSkeletonRows(elements.modelList, 3);
+  appendSkeletonRows(elements.sourceList, 3);
+  appendSkeletonRows(elements.workspaceList, 4);
+  appendSkeletonRows(elements.recentThreads, 4, "thread");
+}
+
 function renderSettings() {
   currentSettings.language = currentSettings.language || "auto";
+  currentSettings.enabledProviders = enabledProviders();
+  if (!isProviderEnabled(currentSettings.activeProvider)) {
+    currentSettings.activeProvider = firstEnabledProvider();
+  }
   elements.codexHomeValue.textContent = currentSettings.codexHome || PROVIDERS.codex.defaultHome;
   elements.claudeHomeValue.textContent = currentSettings.claudeHome || PROVIDERS.claude.defaultHome;
+  elements.copilotHomeValue.textContent = currentSettings.copilotHome || PROVIDERS.copilot.defaultHome;
+  elements.cursorHomeValue.textContent = currentSettings.cursorHome || PROVIDERS.cursor.defaultHome;
+  for (const input of elements.enabledProviderInputs) {
+    input.checked = isProviderEnabled(input.dataset.enabledProvider);
+  }
   for (const button of elements.providerButtons) {
+    button.hidden = !isProviderEnabled(button.dataset.provider);
     const isActive = button.dataset.provider === currentSettings.activeProvider;
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-checked", String(isActive));
@@ -503,6 +774,7 @@ function renderSettings() {
   elements.settingsStatus.textContent = t("settingsSaved");
   applyTheme(currentSettings.theme);
   applyLanguage();
+  setLoading(currentLoading);
 }
 
 function renderRankList(container, items, options = {}) {
@@ -581,7 +853,7 @@ function renderDailyChart(days) {
   elements.dailyChart.replaceChildren();
   elements.dailyChart.style.setProperty("--days", days.length);
 
-  const max = Math.max(...days.map((day) => day.tokens), ...days.map((day) => day.threads), 1);
+  const maxTokens = Math.max(...days.map((day) => day.tokens), 1);
 
   for (const day of days) {
     const column = document.createElement("div");
@@ -589,7 +861,7 @@ function renderDailyChart(days) {
 
     const bar = document.createElement("div");
     bar.className = "day-bar";
-    const intensity = day.tokens / max;
+    const intensity = day.tokens / maxTokens;
     if (intensity >= 0.72) {
       bar.dataset.level = "high";
     } else if (intensity >= 0.36) {
@@ -597,7 +869,10 @@ function renderDailyChart(days) {
     } else {
       bar.dataset.level = "low";
     }
-    bar.style.height = `${Math.max(8, (Math.max(day.tokens, day.threads) / max) * 100)}%`;
+    if (day.tokens === 0) {
+      bar.dataset.empty = "true";
+    }
+    bar.style.height = day.tokens > 0 ? `${Math.max(8, (day.tokens / maxTokens) * 100)}%` : "3px";
     bar.setAttribute("aria-label", `${day.date}: ${formatCompact(day.tokens)} ${t("tokens")}`);
     bar.addEventListener("mouseenter", (event) => {
       bar.classList.add("active");
@@ -668,6 +943,7 @@ function renderRecentThreads(threads) {
 }
 
 function renderStats(stats) {
+  clearSkeletons();
   lastStats = stats;
   const chartDays = stats.settings?.chartDays || currentSettings.chartDays;
   const mainLimit = primaryRateLimit(stats);
@@ -689,7 +965,7 @@ function renderStats(stats) {
     : t("usageEstimated");
   elements.sidebarRemainingUsage.textContent = mainLimit ? formatPercent(mainLimit.remainingPercent) : "-";
   elements.sidebarPeriodMeta.textContent = mainLimit
-    ? t("resetAt", { label: formatLimitLabel(mainLimit), time: formatResetTime(mainLimit) })
+    ? formatLimitMeta(mainLimit)
     : t("waitingForLogs", { provider: provider.label });
   elements.periodTokens.textContent = formatCompact(stats.featured.periodTokens);
   elements.latestTokenUsage.textContent = formatCompact(stats.featured.latestTokenUsage);
@@ -711,16 +987,44 @@ function renderStats(stats) {
   renderRecentThreads(stats.latestThreads);
 }
 
-async function refreshStats() {
+async function refreshStats(options = {}) {
+  const { force = false, preferCache = false } = options;
+  const providerId = currentSettings.activeProvider;
+  const requestId = latestStatsRequestId + 1;
+  latestStatsRequestId = requestId;
+
+  if (!force) {
+    const cached = cachedStats(providerId);
+    if (cached) {
+      renderStats(cached);
+      if (!preferCache) {
+        return;
+      }
+    } else {
+      renderStatsSkeleton(providerId);
+    }
+  } else {
+    renderStatsSkeleton(providerId);
+  }
+
   setLoading(true);
   try {
-    const stats = await aiUsage.getStats(currentSettings.activeProvider);
+    const stats = await aiUsage.getStats(providerId);
+    if (requestId !== latestStatsRequestId || providerId !== currentSettings.activeProvider) {
+      return;
+    }
+    cacheStats(providerId, stats);
     renderStats(stats);
   } catch (error) {
-    const provider = PROVIDERS[currentSettings.activeProvider] || PROVIDERS.codex;
+    if (requestId !== latestStatsRequestId) {
+      return;
+    }
+    const provider = PROVIDERS[providerId] || PROVIDERS.codex;
     renderError(error.message || t("readStatsError", { provider: provider.label }));
   } finally {
-    setLoading(false);
+    if (requestId === latestStatsRequestId) {
+      setLoading(false);
+    }
   }
 }
 
@@ -735,7 +1039,7 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
     renderStats(lastStats);
   }
   if (shouldRefresh) {
-    await refreshStats();
+    await refreshStats({ preferCache: true });
   }
 }
 
@@ -746,6 +1050,7 @@ async function chooseHome(providerId) {
     if (result) {
       currentSettings = result.settings;
       renderSettings();
+      cacheStats(providerId, result.stats);
       renderStats(result.stats);
     }
   } catch (error) {
@@ -777,16 +1082,48 @@ function openProjectLink(event, url) {
 }
 
 document.addEventListener("pointerdown", startWindowDrag, true);
-elements.refreshButton.addEventListener("click", refreshStats);
+elements.refreshButton.addEventListener("click", () => refreshStats({ force: true }));
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));
+elements.settingsBackButton.addEventListener("click", () => setView("home"));
 elements.repositoryLink.addEventListener("click", (event) => openProjectLink(event, REPOSITORY_URL));
 elements.issueLink.addEventListener("click", (event) => openProjectLink(event, ISSUE_URL));
 elements.chooseCodexHomeButton.addEventListener("click", () => chooseHome("codex"));
 elements.chooseClaudeHomeButton.addEventListener("click", () => chooseHome("claude"));
+elements.chooseCopilotHomeButton.addEventListener("click", () => chooseHome("copilot"));
+elements.chooseCursorHomeButton.addEventListener("click", () => chooseHome("cursor"));
 for (const button of elements.providerButtons) {
   button.addEventListener("click", async () => {
+    if (!isProviderEnabled(button.dataset.provider)) return;
     await saveSettings({ activeProvider: button.dataset.provider });
+  });
+}
+for (const input of elements.enabledProviderInputs) {
+  input.addEventListener("change", async () => {
+    const nextEnabledProviders = elements.enabledProviderInputs
+      .filter((providerInput) => providerInput.checked)
+      .map((providerInput) => providerInput.dataset.enabledProvider);
+
+    if (!nextEnabledProviders.length) {
+      input.checked = true;
+      elements.settingsStatus.textContent = t("atLeastOneProvider");
+      return;
+    }
+
+    const nextSettings = { enabledProviders: nextEnabledProviders };
+    if (!nextEnabledProviders.includes(currentSettings.activeProvider)) {
+      nextSettings.activeProvider = nextEnabledProviders[0];
+    }
+    await saveSettings(nextSettings);
+  });
+}
+for (const button of elements.settingsNavButtons) {
+  button.addEventListener("click", () => {
+    const sectionId = button.dataset.settingsSection;
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    activateSettingsNav(sectionId);
+    section.scrollIntoView({ block: "start", behavior: "smooth" });
   });
 }
 elements.themeSelect.addEventListener("change", async () => {
@@ -802,11 +1139,11 @@ for (const button of elements.accentButtons) {
 }
 for (const button of elements.periodButtons) {
   button.addEventListener("click", async () => {
-    await saveSettings({ chartDays: button.dataset.days });
+    await saveSettings({ chartDays: Number(button.dataset.days) });
   });
 }
 elements.chartDaysInput.addEventListener("change", async () => {
-  await saveSettings({ chartDays: elements.chartDaysInput.value });
+  await saveSettings({ chartDays: Number(elements.chartDaysInput.value) });
 });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   applyTheme(currentSettings.theme);
@@ -823,7 +1160,7 @@ async function boot() {
   currentSettings = await aiUsage.getSettings();
   renderSettings();
   setView(currentView);
-  await refreshStats();
+  await refreshStats({ preferCache: true });
 }
 
 boot();

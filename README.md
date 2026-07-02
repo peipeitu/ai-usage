@@ -17,12 +17,20 @@ AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding u
   - Reads local Claude Code session logs from `CLAUDE_CONFIG_DIR` or `CLAUDE_HOME` when set.
   - Defaults to `~/.claude`.
   - Aggregates assistant message usage from Claude Code JSONL logs.
+- GitHub Copilot
+  - Reads local VS Code Copilot extension storage from `GITHUB_COPILOT_HOME` or `COPILOT_HOME` when set.
+  - Defaults to VS Code/Copilot global storage, such as `~/Library/Application Support/Code/User/globalStorage/github.copilot-chat` on macOS.
+  - Aggregates recognized local Copilot chat usage fields and falls back to text-length token estimates when explicit token usage is unavailable.
+- Cursor
+  - Reads local Cursor editor storage from `AI_USAGE_CURSOR_HOME` or `CURSOR_HOME` when set.
+  - Defaults to Cursor global storage, such as `~/Library/Application Support/Cursor/User/globalStorage` on macOS.
+  - Aggregates recognized local Cursor chat/composer usage fields and falls back to text-length token estimates when explicit token usage is unavailable.
 
 ## Current Scope
 
 - Supports macOS, Windows, and Linux through Tauri.
 - Uses a local desktop dashboard with a sidebar provider switch.
-- Includes settings for Codex directory, Claude Code directory, theme, accent color, and chart period.
+- Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, theme, accent color, and chart period.
 - Defaults to a 30-day chart period.
 - No tray integration yet.
 
@@ -109,14 +117,14 @@ Outputs:
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.1_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.1_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.2_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.2_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.1_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.2_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.

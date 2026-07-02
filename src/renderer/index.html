@@ -34,6 +34,12 @@
             <button class="provider-option" type="button" data-provider="claude" aria-checked="false">
               <span>Claude Code</span>
             </button>
+            <button class="provider-option" type="button" data-provider="copilot" aria-checked="false">
+              <span>GitHub Copilot</span>
+            </button>
+            <button class="provider-option" type="button" data-provider="cursor" aria-checked="false">
+              <span>Cursor</span>
+            </button>
           </div>
         </section>
 
@@ -44,18 +50,6 @@
         </section>
 
         <div class="sidebar-footer">
-          <section class="project-links" aria-label="Project links">
-            <a id="repositoryLink" href="https://github.com/peipeitu/ai-usage" target="_blank" rel="noreferrer">GitHub</a>
-            <a
-              id="issueLink"
-              href="https://github.com/peipeitu/ai-usage/issues"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Feedback
-            </a>
-          </section>
-
           <section class="account-pill" aria-label="Codex account">
             <div id="accountInitials" class="account-avatar">CD</div>
             <div>
@@ -177,76 +171,244 @@
         </section>
 
         <section id="settingsView" class="settings-view" hidden>
-          <article class="panel wide settings-panel">
-            <div class="panel-heading">
-              <h2 id="settingsPanelTitle">设置</h2>
-              <span id="settingsStatus">-</span>
-            </div>
+          <div class="settings-drag-region" data-tauri-drag-region aria-hidden="true"></div>
+          <div class="settings-shell">
+            <aside class="settings-rail">
+              <button id="settingsBackButton" class="settings-back" type="button">
+                <span aria-hidden="true">←</span>
+                <span id="settingsBackLabel">返回应用</span>
+              </button>
 
-            <div class="settings-list">
-              <label class="setting-row">
-                <span id="codexHomeLabel">Codex 数据目录</span>
-                <div class="setting-control folder-control">
-                  <code id="codexHomeValue">-</code>
-                  <button id="chooseCodexHomeButton" class="secondary-button" type="button">选择目录</button>
-                </div>
-              </label>
+              <nav class="settings-nav" aria-label="Settings sections">
+                <span id="settingsPersonalLabel" class="settings-nav-heading">个人</span>
+                <button class="settings-nav-item active" type="button" data-settings-section="settingsGeneralSection">
+                  <span aria-hidden="true">⚙</span>
+                  <span id="settingsGeneralNavLabel">常规</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsAppearanceSection">
+                  <span aria-hidden="true">☼</span>
+                  <span id="settingsAppearanceNavLabel">个性化</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsChartSection">
+                  <span aria-hidden="true">◷</span>
+                  <span id="settingsChartNavLabel">图表</span>
+                </button>
 
-              <label class="setting-row">
-                <span id="claudeHomeLabel">Claude Code 数据目录</span>
-                <div class="setting-control folder-control">
-                  <code id="claudeHomeValue">-</code>
-                  <button id="chooseClaudeHomeButton" class="secondary-button" type="button">选择目录</button>
-                </div>
-              </label>
+                <span id="settingsProvidersLabel" class="settings-nav-heading">Providers</span>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCodexProviderSection">
+                  <span aria-hidden="true">⌘</span>
+                  <span id="settingsCodexNavLabel">Codex</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsClaudeProviderSection">
+                  <span aria-hidden="true">◌</span>
+                  <span id="settingsClaudeNavLabel">Claude Code</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCopilotProviderSection">
+                  <span aria-hidden="true">◇</span>
+                  <span id="settingsCopilotNavLabel">GitHub Copilot</span>
+                </button>
+                <button class="settings-nav-item" type="button" data-settings-section="settingsCursorProviderSection">
+                  <span aria-hidden="true">▣</span>
+                  <span id="settingsCursorNavLabel">Cursor</span>
+                </button>
+              </nav>
 
-              <label class="setting-row">
-                <span id="languageLabel">语言</span>
-                <select id="languageSelect">
-                  <option id="languageAutoOption" value="auto">跟随系统</option>
-                  <option id="languageZhOption" value="zh">中文</option>
-                  <option id="languageEnOption" value="en">English</option>
-                </select>
-              </label>
+              <section class="project-links settings-links" aria-label="Project links">
+                <a
+                  id="repositoryLink"
+                  href="https://github.com/peipeitu/ai-usage"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="GitHub"
+                  title="GitHub"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                    <path d="M7 7.5h8.5L19 11v6.5A1.5 1.5 0 0 1 17.5 19h-11A1.5 1.5 0 0 1 5 17.5v-9A1.5 1.5 0 0 1 6.5 7H7v12" />
+                    <path d="M9 5h6.5L18 7.5V10H9V5Z" />
+                    <path d="M9.5 13h5" />
+                  </svg>
+                </a>
+                <a
+                  id="issueLink"
+                  href="https://github.com/peipeitu/ai-usage/issues"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Feedback"
+                  title="Feedback"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                    <path d="M5 6.8A2.8 2.8 0 0 1 7.8 4h8.4A2.8 2.8 0 0 1 19 6.8v5.9a2.8 2.8 0 0 1-2.8 2.8h-4.4L7 19v-3.5A2.8 2.8 0 0 1 5 12.8v-6Z" />
+                    <path d="M9 9.5h6" />
+                    <path d="M9 12.5h3.5" />
+                  </svg>
+                </a>
+              </section>
+            </aside>
 
-              <label class="setting-row">
-                <span id="themeLabel">主题</span>
-                <select id="themeSelect">
-                  <option id="themeSystemOption" value="system">跟随系统</option>
-                  <option id="themeLightOption" value="light">浅色</option>
-                  <option id="themeDarkOption" value="dark">深色</option>
-                </select>
-              </label>
+            <div class="settings-content">
+              <header class="settings-content-header">
+                <h2 id="settingsPanelTitle">常规</h2>
+                <span id="settingsStatus">-</span>
+              </header>
 
-              <label class="setting-row">
-                <span id="accentLabel">主题色</span>
-                <div id="accentOptions" class="accent-options" role="radiogroup" aria-label="主题色">
-                  <button class="swatch" type="button" data-accent="blue" aria-label="Blue"></button>
-                  <button class="swatch" type="button" data-accent="turquoise" aria-label="Turquoise"></button>
-                  <button class="swatch" type="button" data-accent="green" aria-label="Green"></button>
-                  <button class="swatch" type="button" data-accent="purple" aria-label="Purple"></button>
-                  <button class="swatch" type="button" data-accent="red" aria-label="Red"></button>
-                  <button class="swatch" type="button" data-accent="orange" aria-label="Orange"></button>
-                  <button class="swatch" type="button" data-accent="graphite" aria-label="Graphite"></button>
-                </div>
-              </label>
-
-              <label class="setting-row">
-                <span id="chartPeriodLabel">图表周期</span>
-                <div class="period-control">
-                  <div id="periodPresets" class="period-presets" aria-label="图表周期快捷选择">
-                    <button id="period7Button" type="button" data-days="7">一周</button>
-                    <button id="period30Button" type="button" data-days="30">一个月</button>
-                    <button id="period90Button" type="button" data-days="90">三个月</button>
+              <div class="settings-list">
+                <section id="settingsGeneralSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsGeneralTitle">常规</h3>
                   </div>
-                  <label class="days-input">
-                    <input id="chartDaysInput" type="number" min="7" max="365" step="1" />
-                    <span id="daysSuffix">天</span>
-                  </label>
-                </div>
-              </label>
+                  <div class="settings-group">
+                    <label class="setting-row">
+                      <span id="languageLabel">语言</span>
+                      <select id="languageSelect">
+                        <option id="languageAutoOption" value="auto">跟随系统</option>
+                        <option id="languageZhOption" value="zh">中文</option>
+                        <option id="languageEnOption" value="en">English</option>
+                      </select>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsAppearanceSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsAppearanceTitle">个性化</h3>
+                  </div>
+                  <div class="settings-group">
+                    <label class="setting-row">
+                      <span id="themeLabel">主题</span>
+                      <select id="themeSelect">
+                        <option id="themeSystemOption" value="system">跟随系统</option>
+                        <option id="themeLightOption" value="light">浅色</option>
+                        <option id="themeDarkOption" value="dark">深色</option>
+                      </select>
+                    </label>
+
+                    <label class="setting-row">
+                      <span id="accentLabel">主题色</span>
+                      <div id="accentOptions" class="accent-options" role="radiogroup" aria-label="主题色">
+                        <button class="swatch" type="button" data-accent="blue" aria-label="Blue"></button>
+                        <button class="swatch" type="button" data-accent="turquoise" aria-label="Turquoise"></button>
+                        <button class="swatch" type="button" data-accent="green" aria-label="Green"></button>
+                        <button class="swatch" type="button" data-accent="purple" aria-label="Purple"></button>
+                        <button class="swatch" type="button" data-accent="red" aria-label="Red"></button>
+                        <button class="swatch" type="button" data-accent="orange" aria-label="Orange"></button>
+                        <button class="swatch" type="button" data-accent="graphite" aria-label="Graphite"></button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsChartSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsChartTitle">图表</h3>
+                  </div>
+                  <div class="settings-group">
+                    <label class="setting-row">
+                      <span id="chartPeriodLabel">图表周期</span>
+                      <div class="period-control">
+                        <div id="periodPresets" class="period-presets" aria-label="图表周期快捷选择">
+                          <button id="period7Button" type="button" data-days="7">一周</button>
+                          <button id="period30Button" type="button" data-days="30">一个月</button>
+                          <button id="period90Button" type="button" data-days="90">三个月</button>
+                        </div>
+                        <label class="days-input">
+                          <input id="chartDaysInput" type="number" min="7" max="365" step="1" />
+                          <span id="daysSuffix">天</span>
+                        </label>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsCodexProviderSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsCodexProviderTitle">Codex</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span data-provider-enabled-label>启用</span>
+                      <label class="toggle-item provider-toggle">
+                        <input id="enableCodexInput" type="checkbox" data-enabled-provider="codex" />
+                        <span>Codex</span>
+                      </label>
+                    </div>
+                    <label class="setting-row">
+                      <span id="codexHomeLabel">Codex 数据目录</span>
+                      <div class="setting-control folder-control">
+                        <code id="codexHomeValue">-</code>
+                        <button id="chooseCodexHomeButton" class="secondary-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsClaudeProviderSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsClaudeProviderTitle">Claude Code</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span data-provider-enabled-label>启用</span>
+                      <label class="toggle-item provider-toggle">
+                        <input id="enableClaudeInput" type="checkbox" data-enabled-provider="claude" />
+                        <span>Claude Code</span>
+                      </label>
+                    </div>
+                    <label class="setting-row">
+                      <span id="claudeHomeLabel">Claude Code 数据目录</span>
+                      <div class="setting-control folder-control">
+                        <code id="claudeHomeValue">-</code>
+                        <button id="chooseClaudeHomeButton" class="secondary-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsCopilotProviderSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsCopilotProviderTitle">GitHub Copilot</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span data-provider-enabled-label>启用</span>
+                      <label class="toggle-item provider-toggle">
+                        <input id="enableCopilotInput" type="checkbox" data-enabled-provider="copilot" />
+                        <span>GitHub Copilot</span>
+                      </label>
+                    </div>
+                    <label class="setting-row">
+                      <span id="copilotHomeLabel">GitHub Copilot 数据目录</span>
+                      <div class="setting-control folder-control">
+                        <code id="copilotHomeValue">-</code>
+                        <button id="chooseCopilotHomeButton" class="secondary-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section id="settingsCursorProviderSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsCursorProviderTitle">Cursor</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span data-provider-enabled-label>启用</span>
+                      <label class="toggle-item provider-toggle">
+                        <input id="enableCursorInput" type="checkbox" data-enabled-provider="cursor" />
+                        <span>Cursor</span>
+                      </label>
+                    </div>
+                    <label class="setting-row">
+                      <span id="cursorHomeLabel">Cursor 数据目录</span>
+                      <div class="setting-control folder-control">
+                        <code id="cursorHomeValue">-</code>
+                        <button id="chooseCursorHomeButton" class="secondary-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+              </div>
             </div>
-          </article>
+          </div>
         </section>
       </section>
     </main>
