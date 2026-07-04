@@ -578,7 +578,7 @@ async fn check_update(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = app;
-        return Ok(unsupported_update_info());
+        Ok(unsupported_update_info())
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -621,7 +621,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = app;
-        return Err("Automatic updates are not supported on this platform.".to_string());
+        Err("Automatic updates are not supported on this platform.".to_string())
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -715,7 +715,7 @@ fn rank_by_tokens(items: impl IntoIterator<Item = (String, u64)>, limit: usize) 
         .into_iter()
         .map(|(name, value)| RankItem { name, value })
         .collect();
-    items.sort_by(|a, b| b.value.cmp(&a.value));
+    items.sort_by_key(|item| std::cmp::Reverse(item.value));
     items.truncate(limit);
     items
 }
@@ -951,11 +951,11 @@ fn rate_limit_window_label(minutes: u64) -> String {
         "5 小时".to_string()
     } else if minutes == 10080 {
         "1 周".to_string()
-    } else if minutes >= 10080 && minutes % 10080 == 0 {
+    } else if minutes >= 10080 && minutes.is_multiple_of(10080) {
         format!("{} 周", minutes / 10080)
-    } else if minutes >= 1440 && minutes % 1440 == 0 {
+    } else if minutes >= 1440 && minutes.is_multiple_of(1440) {
         format!("{} 天", minutes / 1440)
-    } else if minutes >= 60 && minutes % 60 == 0 {
+    } else if minutes >= 60 && minutes.is_multiple_of(60) {
         format!("{} 小时", minutes / 60)
     } else {
         format!("{minutes} 分钟")
@@ -1092,6 +1092,7 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
     events
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_stats_from_threads(
     mut threads: Vec<Thread>,
     now: DateTime<Local>,
@@ -1199,7 +1200,7 @@ fn build_stats_from_threads(
         }
     }
 
-    threads.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at_ms));
     let latest_threads = threads
         .iter()
         .take(8)
@@ -1258,7 +1259,7 @@ fn build_stats_from_threads(
         rate_limits: latest_rate_limits,
         totals: Totals {
             threads: threads.len(),
-            active_threads: active_threads,
+            active_threads,
             archived_threads: threads.len() - active_threads,
             total_tokens,
             updated_this_week,
@@ -2179,7 +2180,7 @@ fn estimate_tokens_from_text(text: &str) -> u64 {
         .chars()
         .filter(|character| !character.is_whitespace())
         .count() as u64;
-    ((chars + 3) / 4).max(1)
+    chars.div_ceil(4).max(1)
 }
 
 fn copilot_text_tokens(value: &Value) -> u64 {
@@ -2693,7 +2694,7 @@ fn read_chatgpt_data_file(path: &Path) -> Option<Thread> {
         .ok()
         .and_then(system_time_to_ms)
         .unwrap_or(updated_at_ms);
-    let tokens_used = ((metadata.len() + 3) / 4).max(1);
+    let tokens_used = metadata.len().div_ceil(4).max(1);
     let model = "ChatGPT".to_string();
     let event = UsageEvent {
         thread_id: id.clone(),
@@ -3098,12 +3099,11 @@ fn read_github_copilot_account(scan_roots: &[PathBuf]) -> Account {
                 }
             }
 
-            if key == "extensionsAssignmentFilterProvider.copilotSku"
-                || key == "exp.github.copilot.sku"
+            if (key == "extensionsAssignmentFilterProvider.copilotSku"
+                || key == "exp.github.copilot.sku")
+                && is_display_identifier(&value)
             {
-                if is_display_identifier(&value) {
-                    plan_type = Some(value.clone());
-                }
+                plan_type = Some(value.clone());
             }
 
             if let Some(parsed) = parse_json_value(&value) {
@@ -3955,6 +3955,33 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
     ))
 }
 
+fn main() {
+    let builder = tauri::Builder::default();
+
+    #[cfg(any(windows, target_os = "linux"))]
+    let builder = {
+        let mut builder = builder;
+        if let Some(pubkey) = updater_public_key() {
+            builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
+        }
+        builder
+    };
+
+    builder
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            update_settings,
+            get_stats,
+            choose_home,
+            start_window_drag,
+            open_external,
+            check_update,
+            install_update
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running AI Usage");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4403,7 +4430,7 @@ mod tests {
         assert_eq!(stats.featured.period_tokens, 1700);
         assert_eq!(stats.featured.period_cost, 0.0017);
         assert_eq!(stats.featured.latest_token_usage, 1500);
-        assert_eq!(stats.featured.cost_estimated_from_token_events, true);
+        assert!(stats.featured.cost_estimated_from_token_events);
         assert_eq!(
             stats.rate_limits.as_ref().unwrap().windows[0].label,
             "5 小时"
@@ -4826,7 +4853,7 @@ mod tests {
         fs::create_dir_all(root.join("workspace-data").join("user-local123__workspace"))
             .expect("chatgpt user-scoped directory should be created");
 
-        let account = read_chatgpt_account(&[root.clone()]);
+        let account = read_chatgpt_account(std::slice::from_ref(&root));
 
         assert_eq!(account.display_name, "ChatGPT user local123");
         assert_eq!(account.initials, "CG");
@@ -4963,7 +4990,7 @@ mod tests {
             )
             .expect("cursor account row should be inserted");
 
-        let account = read_cursor_account(&[storage.clone()]);
+        let account = read_cursor_account(std::slice::from_ref(&storage));
 
         assert_eq!(account.display_name, "cursor@example.com");
         assert_eq!(account.initials, "C");
@@ -5011,7 +5038,7 @@ mod tests {
             )
             .expect("cursor plan row should be inserted");
 
-        let account = read_cursor_account(&[storage.clone()]);
+        let account = read_cursor_account(std::slice::from_ref(&storage));
 
         assert_eq!(account.display_name, "cursor-user@example.com");
         assert_eq!(account.initials, "C");
@@ -5157,31 +5184,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(file_path.parent().unwrap());
     }
-}
-
-fn main() {
-    let builder = tauri::Builder::default();
-
-    #[cfg(any(windows, target_os = "linux"))]
-    let builder = {
-        let mut builder = builder;
-        if let Some(pubkey) = updater_public_key() {
-            builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
-        }
-        builder
-    };
-
-    builder
-        .invoke_handler(tauri::generate_handler![
-            get_settings,
-            update_settings,
-            get_stats,
-            choose_home,
-            start_window_drag,
-            open_external,
-            check_update,
-            install_update
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running AI Usage");
 }
