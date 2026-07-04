@@ -2,9 +2,11 @@ use std::{
     collections::HashMap,
     env,
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose, Engine};
@@ -17,13 +19,23 @@ use tauri_plugin_updater::UpdaterExt;
 use walkdir::WalkDir;
 
 #[cfg(any(windows, target_os = "linux"))]
-const UPDATE_ENDPOINT: &str = "https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json";
+const UPDATE_ENDPOINT: &str =
+    "https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json";
 const MIN_CHART_DAYS: u32 = 7;
 const DEFAULT_CHART_DAYS: u32 = 30;
 const MAX_CHART_DAYS: u32 = 90;
+const DEFAULT_AUTO_REFRESH_ENABLED: bool = false;
+const DEFAULT_AUTO_REFRESH_MINUTES: u32 = 30;
+const MAX_AUTO_REFRESH_MINUTES: u32 = 1440;
 const CODEX_USD_PER_MILLION_TOKENS: f64 = 1.0;
+const DEFAULT_SCAN_MAX_DEPTH: usize = 8;
+const DEFAULT_SCAN_MAX_FILES: usize = 20_000;
+const CHATGPT_SQLITE_ROW_SCAN_LIMIT: usize = 2_000;
 const CLAUDE_ESTIMATED_5H_TOKEN_LIMIT: u64 = 500_000;
 const CLAUDE_ESTIMATED_WEEKLY_TOKEN_LIMIT: u64 = 2_500_000;
+const CHATGPT_ESTIMATED_3H_ACTIVITY_LIMIT: u64 = 80;
+const CHATGPT_ESTIMATED_WEEKLY_ACTIVITY_LIMIT: u64 = 500;
+static SETTINGS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +58,10 @@ struct Settings {
     theme: String,
     accent_color: String,
     chart_days: u32,
+    #[serde(default = "default_auto_refresh_enabled")]
+    auto_refresh_enabled: bool,
+    #[serde(default = "default_auto_refresh_minutes")]
+    auto_refresh_minutes: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,11 +103,13 @@ struct Pricing {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Featured {
+    today_tokens: u64,
     today_cost: f64,
     period_cost: f64,
     period_tokens: u64,
     latest_token_usage: u64,
     period_usage_percent: Option<f64>,
+    cost_available: bool,
     cost_estimated_from_token_events: bool,
 }
 
@@ -223,11 +241,21 @@ fn default_settings() -> Settings {
         theme: "system".to_string(),
         accent_color: "blue".to_string(),
         chart_days: DEFAULT_CHART_DAYS,
+        auto_refresh_enabled: DEFAULT_AUTO_REFRESH_ENABLED,
+        auto_refresh_minutes: DEFAULT_AUTO_REFRESH_MINUTES,
     }
 }
 
 fn default_language() -> String {
     "auto".to_string()
+}
+
+fn default_auto_refresh_minutes() -> u32 {
+    DEFAULT_AUTO_REFRESH_MINUTES
+}
+
+fn default_auto_refresh_enabled() -> bool {
+    DEFAULT_AUTO_REFRESH_ENABLED
 }
 
 fn default_enabled_providers() -> Vec<String> {
@@ -296,6 +324,10 @@ fn normalize_settings(settings: Settings) -> Settings {
             "blue".to_string()
         },
         chart_days: settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS),
+        auto_refresh_enabled: settings.auto_refresh_enabled,
+        auto_refresh_minutes: settings
+            .auto_refresh_minutes
+            .clamp(1, MAX_AUTO_REFRESH_MINUTES),
     }
 }
 
@@ -312,9 +344,81 @@ fn load_settings() -> Settings {
         return default_settings();
     };
 
-    serde_json::from_str::<Settings>(&content)
-        .map(normalize_settings)
-        .unwrap_or_else(|_| default_settings())
+    match serde_json::from_str::<Settings>(&content) {
+        Ok(settings) => normalize_settings(settings),
+        Err(_) => {
+            quarantine_invalid_settings(&settings_path());
+            default_settings()
+        }
+    }
+}
+
+fn quarantine_invalid_settings(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let backup_name = format!(
+        "settings.invalid-{}.json",
+        Utc::now().format("%Y%m%d%H%M%S%3f")
+    );
+    let backup_path = path.with_file_name(backup_name);
+    let _ = fs::rename(path, backup_path);
+}
+
+fn unique_settings_sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let counter = SETTINGS_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.{}.{}",
+        std::process::id(),
+        nonce,
+        counter,
+        suffix
+    ))
+}
+
+fn unique_settings_temp_path(path: &Path) -> PathBuf {
+    unique_settings_sibling_path(path, "tmp")
+}
+
+#[cfg(target_os = "windows")]
+fn replace_settings_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return fs::rename(temp_path, path).map_err(|error| error.to_string());
+    }
+
+    let backup_path = unique_settings_sibling_path(path, "bak");
+    fs::rename(path, &backup_path).map_err(|error| error.to_string())?;
+
+    match fs::rename(temp_path, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(backup_path);
+            Ok(())
+        }
+        Err(error) => {
+            let restore_result = fs::rename(&backup_path, path);
+            if let Err(restore_error) = restore_result {
+                Err(format!(
+                    "Unable to replace settings file: {error}; also failed to restore previous settings: {restore_error}"
+                ))
+            } else {
+                Err(error.to_string())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_settings_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(temp_path, path).map_err(|error| error.to_string())
 }
 
 fn save_settings(settings: &Settings) -> Result<(), String> {
@@ -324,7 +428,21 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
     }
 
     let content = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{content}\n")).map_err(|error| error.to_string())
+    let temp_path = unique_settings_temp_path(&path);
+    let write_result = (|| -> Result<(), String> {
+        let mut file = File::create(&temp_path).map_err(|error| error.to_string())?;
+        file.write_all(format!("{content}\n").as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+
+        replace_settings_file(&temp_path, &path)
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 fn current_app_version() -> String {
@@ -552,10 +670,6 @@ fn iso_from_ms(ms: i64) -> Option<String> {
         .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-fn estimate_cost(tokens: u64) -> f64 {
-    (tokens as f64 / 1_000_000.0) * CODEX_USD_PER_MILLION_TOKENS
-}
-
 fn start_of_local_day_ms(now: DateTime<Local>) -> i64 {
     Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
@@ -604,6 +718,42 @@ fn rank_by_tokens(items: impl IntoIterator<Item = (String, u64)>, limit: usize) 
     items.sort_by(|a, b| b.value.cmp(&a.value));
     items.truncate(limit);
     items
+}
+
+fn rank_by_tokens_with_other(
+    items: impl IntoIterator<Item = (String, u64)>,
+    visible_limit: usize,
+    other_name: &str,
+) -> Vec<RankItem> {
+    let mut ranked = rank_by_tokens(items, usize::MAX);
+    if ranked.len() <= visible_limit {
+        return ranked;
+    }
+
+    let other_value = ranked
+        .iter()
+        .skip(visible_limit)
+        .map(|item| item.value)
+        .sum();
+    ranked.truncate(visible_limit);
+    ranked.push(RankItem {
+        name: other_name.to_string(),
+        value: other_value,
+    });
+    ranked
+}
+
+fn thread_usage_total(thread: &Thread) -> u64 {
+    let event_total: u64 = thread
+        .usage_events
+        .iter()
+        .map(|event| event.total_tokens)
+        .sum();
+    if event_total > 0 {
+        event_total
+    } else {
+        thread.tokens_used
+    }
 }
 
 fn format_plan_type(plan_type: Option<&str>) -> String {
@@ -919,10 +1069,8 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
                 }
                 None => last_total_tokens.unwrap_or(0),
             };
-            let rate_limits = normalize_rate_limits(
-                entry.pointer("/payload/rate_limits"),
-                timestamp_ms,
-            );
+            let rate_limits =
+                normalize_rate_limits(entry.pointer("/payload/rate_limits"), timestamp_ms);
             if total_tokens == 0 && rate_limits.is_none() {
                 continue;
             }
@@ -950,6 +1098,7 @@ fn build_stats_from_threads(
     chart_days: u32,
     account: Account,
     pricing: Option<Pricing>,
+    usd_per_million_tokens: Option<f64>,
     rate_limits_enabled: bool,
     paths: Value,
 ) -> Stats {
@@ -962,7 +1111,7 @@ fn build_stats_from_threads(
     let period_start_ms = today_start_ms - (chart_days as i64 - 1) * 24 * 60 * 60 * 1000;
     let recent_threshold = now.timestamp_millis() - 7 * 24 * 60 * 60 * 1000;
     let active_threads = threads.iter().filter(|thread| !thread.archived).count();
-    let total_tokens = threads.iter().map(|thread| thread.tokens_used).sum();
+    let total_tokens = threads.iter().map(thread_usage_total).sum();
     let updated_this_week = threads
         .iter()
         .filter(|thread| thread.updated_at_ms >= recent_threshold)
@@ -994,7 +1143,16 @@ fn build_stats_from_threads(
             .map(|thread| thread.tokens_used)
             .sum()
     };
-    let period_cost = estimate_cost(period_tokens);
+    let cost_available = usd_per_million_tokens
+        .map(|cost| cost.is_finite() && cost > 0.0)
+        .unwrap_or(false);
+    let estimate_provider_cost = |tokens: u64| {
+        usd_per_million_tokens
+            .filter(|cost| cost.is_finite() && *cost > 0.0)
+            .map(|cost| (tokens as f64 / 1_000_000.0) * cost)
+            .unwrap_or(0.0)
+    };
+    let period_cost = estimate_provider_cost(period_tokens);
     let latest_plan_type = usage_events
         .iter()
         .filter(|event| event.plan_type.is_some())
@@ -1026,7 +1184,7 @@ fn build_stats_from_threads(
                 daily_series[*index].threads += 1;
                 if !has_usage_events {
                     daily_series[*index].tokens += thread.tokens_used;
-                    daily_series[*index].cost = estimate_cost(daily_series[*index].tokens);
+                    daily_series[*index].cost = estimate_provider_cost(daily_series[*index].tokens);
                 }
             }
         }
@@ -1036,7 +1194,7 @@ fn build_stats_from_threads(
         if let Some(key) = local_date_key(event.timestamp_ms) {
             if let Some(index) = day_indexes.get(&key) {
                 daily_series[*index].tokens += event.total_tokens;
-                daily_series[*index].cost = estimate_cost(daily_series[*index].tokens);
+                daily_series[*index].cost = estimate_provider_cost(daily_series[*index].tokens);
             }
         }
     }
@@ -1050,7 +1208,7 @@ fn build_stats_from_threads(
             title: thread.title.clone(),
             model: thread.model.clone(),
             source: thread.source.clone(),
-            tokens_used: thread.tokens_used,
+            tokens_used: thread_usage_total(thread),
             updated_at: iso_from_ms(thread.updated_at_ms),
             cwd: thread.cwd.clone(),
         })
@@ -1088,11 +1246,13 @@ fn build_stats_from_threads(
         settings: ChartSettings { chart_days },
         pricing,
         featured: Featured {
-            today_cost: estimate_cost(today_tokens),
+            today_tokens,
+            today_cost: estimate_provider_cost(today_tokens),
             period_cost,
             period_tokens,
             latest_token_usage,
             period_usage_percent,
+            cost_available,
             cost_estimated_from_token_events: has_usage_events,
         },
         rate_limits: latest_rate_limits,
@@ -1104,11 +1264,12 @@ fn build_stats_from_threads(
             updated_this_week,
         },
         daily_series,
-        models: rank_by_tokens(
+        models: rank_by_tokens_with_other(
             threads
                 .iter()
-                .map(|thread| (thread.model.clone(), thread.tokens_used)),
-            6,
+                .map(|thread| (thread.model.clone(), thread_usage_total(thread))),
+            4,
+            "其他",
         ),
         sources: rank_by_tokens(threads.iter().map(|thread| (thread.source.clone(), 1)), 6),
         workspaces: rank_by_tokens(
@@ -1121,7 +1282,7 @@ fn build_stats_from_threads(
                         .and_then(|name| name.to_str())
                         .unwrap_or(&thread.cwd)
                         .to_string();
-                    (name, thread.tokens_used)
+                    (name, thread_usage_total(thread))
                 }),
             6,
         ),
@@ -1150,11 +1311,13 @@ fn empty_stats(
         settings: ChartSettings { chart_days },
         pricing: None,
         featured: Featured {
+            today_tokens: 0,
             today_cost: 0.0,
             period_cost: 0.0,
             period_tokens: 0,
             latest_token_usage: 0,
             period_usage_percent: None,
+            cost_available: false,
             cost_estimated_from_token_events: true,
         },
         rate_limits: None,
@@ -1223,6 +1386,7 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
         chart_days,
         account,
         pricing,
+        Some(CODEX_USD_PER_MILLION_TOKENS),
         true,
         paths,
     ))
@@ -1431,6 +1595,14 @@ fn claude_estimated_token_limit(env_key: &str, fallback: u64) -> u64 {
         .unwrap_or(fallback)
 }
 
+fn chatgpt_estimated_activity_limit(env_key: &str, fallback: u64) -> u64 {
+    env::var(env_key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
 fn estimated_rate_limit_window(
     id: &str,
     label: String,
@@ -1516,7 +1688,79 @@ fn build_claude_estimated_rate_limits(
     })
 }
 
-fn format_claude_plan_label(user_type: Option<&str>, is_claude_ai_auth: bool) -> String {
+fn find_claude_plan_type(value: &Value) -> Option<String> {
+    find_string_deep_ci(
+        value,
+        &[
+            "plan",
+            "planType",
+            "plan_type",
+            "planName",
+            "plan_name",
+            "subscription",
+            "subscriptionType",
+            "subscription_type",
+            "subscriptionPlan",
+            "subscription_plan",
+            "tier",
+            "billingPlan",
+            "billing_plan",
+            "membership",
+            "membershipType",
+            "membership_type",
+            "seatTier",
+            "seat_tier",
+            "userRateLimitTier",
+            "user_rate_limit_tier",
+            "organizationRateLimitTier",
+            "organization_rate_limit_tier",
+            "sku",
+        ],
+    )
+    .filter(|value| {
+        !matches!(
+            value.trim().to_lowercase().as_str(),
+            "external" | "internal" | "oauth" | "claude_ai" | "claude.ai"
+        )
+    })
+}
+
+fn read_claude_config_plan_type(home: &Path) -> Option<String> {
+    let mut candidates = vec![home.join("settings.json")];
+    if let Some(parent) = home.parent() {
+        candidates.push(parent.join(".claude.json"));
+    }
+    if let Ok(entries) = fs::read_dir(home.join("backups")) {
+        candidates.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+    }
+
+    candidates
+        .iter()
+        .filter(|path| path.is_file())
+        .find_map(|path| {
+            let content = fs::read_to_string(path).ok()?;
+            let parsed = parse_json_value(&content)?;
+            find_claude_plan_type(&parsed)
+        })
+}
+
+fn format_claude_plan_label(
+    plan_type: Option<&str>,
+    user_type: Option<&str>,
+    is_claude_ai_auth: bool,
+) -> String {
+    if let Some(plan_type) = plan_type.map(str::trim).filter(|value| !value.is_empty()) {
+        let normalized = plan_type
+            .replace("Claude.ai", "")
+            .replace("claude.ai", "")
+            .replace("Anthropic", "")
+            .replace("anthropic", "")
+            .replace("Claude", "")
+            .replace("claude", "")
+            .replace("default", "");
+        return format_plan_label("Claude", Some(&normalized));
+    }
+
     if is_claude_ai_auth {
         return "Claude.ai account".to_string();
     }
@@ -1529,7 +1773,8 @@ fn format_claude_plan_label(user_type: Option<&str>, is_claude_ai_auth: bool) ->
 
 fn read_claude_account(home: &Path) -> Account {
     let telemetry_path = home.join("telemetry");
-    let mut latest: Option<(i64, String, Option<String>, bool)> = None;
+    let mut latest_identity: Option<(i64, String, Option<String>, bool)> = None;
+    let mut latest_plan_type: Option<(i64, String)> = None;
 
     if telemetry_path.exists() {
         for entry in WalkDir::new(&telemetry_path)
@@ -1560,10 +1805,7 @@ fn read_claude_account(home: &Path) -> Account {
                     .pointer("/env/is_claude_ai_auth")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-
-                if email.is_none() && user_type.is_none() && !is_claude_ai_auth {
-                    continue;
-                }
+                let plan_type = find_claude_plan_type(data);
 
                 let timestamp_ms = data
                     .get("client_timestamp")
@@ -1571,27 +1813,48 @@ fn read_claude_account(home: &Path) -> Account {
                     .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
                     .map(|timestamp| timestamp.timestamp_millis())
                     .unwrap_or(0);
-                let display_name = email.unwrap_or_else(|| "Claude Code".to_string());
-                let should_update = latest
-                    .as_ref()
-                    .map(|(previous_ms, _, _, _)| timestamp_ms >= *previous_ms)
-                    .unwrap_or(true);
+                if email.is_some() || user_type.is_some() || is_claude_ai_auth {
+                    let display_name = email.unwrap_or_else(|| "Claude Code".to_string());
+                    let should_update = latest_identity
+                        .as_ref()
+                        .map(|(previous_ms, _, _, _)| timestamp_ms >= *previous_ms)
+                        .unwrap_or(true);
 
-                if should_update {
-                    latest = Some((timestamp_ms, display_name, user_type, is_claude_ai_auth));
+                    if should_update {
+                        latest_identity =
+                            Some((timestamp_ms, display_name, user_type, is_claude_ai_auth));
+                    }
+                }
+
+                if let Some(plan_type) = plan_type {
+                    let should_update = latest_plan_type
+                        .as_ref()
+                        .map(|(previous_ms, _)| timestamp_ms >= *previous_ms)
+                        .unwrap_or(true);
+
+                    if should_update {
+                        latest_plan_type = Some((timestamp_ms, plan_type));
+                    }
                 }
             }
         }
     }
 
     let (_, display_name, user_type, is_claude_ai_auth) =
-        latest.unwrap_or_else(|| (0, "Claude Code".to_string(), None, false));
-    let plan_label = format_claude_plan_label(user_type.as_deref(), is_claude_ai_auth);
+        latest_identity.unwrap_or_else(|| (0, "Claude Code".to_string(), None, false));
+    let telemetry_plan_type = latest_plan_type.map(|(_, plan_type)| plan_type);
+    let plan_type = telemetry_plan_type.or_else(|| read_claude_config_plan_type(home));
+    let plan_label = format_claude_plan_label(
+        plan_type.as_deref(),
+        user_type.as_deref(),
+        is_claude_ai_auth,
+    );
+    let account_plan_type = plan_type.or(user_type);
 
     Account {
         initials: initials_from_name(&display_name, "CC"),
         display_name,
-        plan_type: user_type,
+        plan_type: account_plan_type,
         plan_label,
         plan_monthly_usd: None,
     }
@@ -1643,6 +1906,7 @@ fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
         chart_days,
         account,
         pricing,
+        None,
         false,
         paths,
     );
@@ -2405,6 +2669,59 @@ fn read_chatgpt_jsonish_file(path: &Path) -> Vec<Thread> {
         .collect()
 }
 
+fn system_time_to_ms(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as i64)
+}
+
+fn read_chatgpt_data_file(path: &Path) -> Option<Thread> {
+    let path_text = path.to_string_lossy().to_lowercase();
+    if !path_text.contains("conversations-v") {
+        return None;
+    }
+
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() == 0 {
+        return None;
+    }
+
+    let id = path.file_stem()?.to_string_lossy().to_string();
+    let updated_at_ms = metadata.modified().ok().and_then(system_time_to_ms)?;
+    let created_at_ms = metadata
+        .created()
+        .ok()
+        .and_then(system_time_to_ms)
+        .unwrap_or(updated_at_ms);
+    let tokens_used = ((metadata.len() + 3) / 4).max(1);
+    let model = "ChatGPT".to_string();
+    let event = UsageEvent {
+        thread_id: id.clone(),
+        timestamp_ms: updated_at_ms,
+        model: model.clone(),
+        total_tokens: tokens_used,
+        plan_type: None,
+        rate_limits: None,
+    };
+
+    Some(Thread {
+        id: id.clone(),
+        title: format!(
+            "ChatGPT conversation {}",
+            id.chars().take(8).collect::<String>()
+        ),
+        source: "ChatGPT Desktop".to_string(),
+        model,
+        cwd: String::new(),
+        archived: false,
+        tokens_used,
+        created_at_ms,
+        updated_at_ms,
+        rollout_path: path.to_string_lossy().to_string(),
+        usage_events: vec![event],
+    })
+}
+
 fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
     let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return Vec::new();
@@ -2419,14 +2736,21 @@ fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
     };
 
     let mut threads = Vec::new();
+    let mut scanned_rows = 0_usize;
     for table in table_rows.filter_map(Result::ok) {
+        if scanned_rows >= CHATGPT_SQLITE_ROW_SCAN_LIMIT {
+            break;
+        }
         if !table
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
         {
             continue;
         }
-        let Ok(mut statement) = connection.prepare(&format!("select * from {table}")) else {
+        let remaining_rows = CHATGPT_SQLITE_ROW_SCAN_LIMIT - scanned_rows;
+        let Ok(mut statement) =
+            connection.prepare(&format!("select * from {table} limit {remaining_rows}"))
+        else {
             continue;
         };
         let column_count = statement.column_count();
@@ -2454,6 +2778,7 @@ fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
         };
 
         for (index, value) in rows.filter_map(Result::ok).enumerate() {
+            scanned_rows += 1;
             let searchable = value.to_string().to_lowercase();
             if !["chatgpt", "openai", "conversation", "message", "gpt"]
                 .iter()
@@ -2479,10 +2804,95 @@ fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
             ) {
                 threads.push(thread);
             }
+
+            if scanned_rows >= CHATGPT_SQLITE_ROW_SCAN_LIMIT {
+                break;
+            }
         }
     }
 
     threads
+}
+
+fn build_chatgpt_estimated_rate_limits(
+    threads: &[Thread],
+    now: DateTime<Local>,
+) -> Option<RateLimits> {
+    if threads.is_empty() {
+        return None;
+    }
+
+    let now_ms = now.timestamp_millis();
+    let activity_times = threads
+        .iter()
+        .flat_map(|thread| {
+            let event_times = thread
+                .usage_events
+                .iter()
+                .filter(|event| event.timestamp_ms > 0)
+                .map(|event| event.timestamp_ms)
+                .collect::<Vec<_>>();
+            if event_times.is_empty() {
+                vec![thread.updated_at_ms]
+            } else {
+                event_times
+            }
+        })
+        .filter(|timestamp_ms| *timestamp_ms > 0 && *timestamp_ms <= now_ms)
+        .collect::<Vec<_>>();
+
+    if activity_times.is_empty() {
+        return None;
+    }
+
+    let windows = [
+        (
+            "primary",
+            180_u64,
+            chatgpt_estimated_activity_limit(
+                "AI_USAGE_CHATGPT_3H_ACTIVITY_LIMIT",
+                CHATGPT_ESTIMATED_3H_ACTIVITY_LIMIT,
+            ),
+        ),
+        (
+            "secondary",
+            10080_u64,
+            chatgpt_estimated_activity_limit(
+                "AI_USAGE_CHATGPT_WEEKLY_ACTIVITY_LIMIT",
+                CHATGPT_ESTIMATED_WEEKLY_ACTIVITY_LIMIT,
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(id, window_minutes, activity_limit)| {
+        let window_start_ms = now_ms - window_minutes as i64 * 60 * 1000;
+        let window_times = activity_times
+            .iter()
+            .copied()
+            .filter(|timestamp_ms| *timestamp_ms >= window_start_ms)
+            .collect::<Vec<_>>();
+        let resets_at_ms = window_times
+            .iter()
+            .min()
+            .map(|timestamp_ms| *timestamp_ms + window_minutes as i64 * 60 * 1000);
+
+        estimated_rate_limit_window(
+            id,
+            rate_limit_window_label(window_minutes),
+            window_minutes,
+            window_times.len() as u64,
+            activity_limit,
+            resets_at_ms,
+        )
+    })
+    .collect();
+
+    Some(RateLimits {
+        updated_at: Some(iso_now()),
+        plan_type: Some("local_estimate".to_string()),
+        reached_type: None,
+        windows,
+    })
 }
 
 fn state_db_candidates(scan_roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -2605,6 +3015,62 @@ fn parse_json_value(value: &str) -> Option<Value> {
     serde_json::from_str::<Value>(value).ok()
 }
 
+fn parse_json_or_nested_value(value: &str) -> Option<Value> {
+    let parsed = parse_json_value(value)?;
+    if let Value::String(text) = &parsed {
+        let trimmed = text.trim();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if let Some(nested) = parse_json_value(trimmed) {
+                return Some(nested);
+            }
+        }
+    }
+    Some(parsed)
+}
+
+fn plain_display_value(value: &str) -> Option<String> {
+    match parse_json_value(value) {
+        Some(Value::String(text)) => {
+            let text = text.trim();
+            is_display_identifier(text).then(|| text.to_string())
+        }
+        _ => {
+            let text = value.trim();
+            is_display_identifier(text).then(|| text.to_string())
+        }
+    }
+}
+
+fn key_contains_ci(key_lower: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| key_lower.contains(&candidate.to_lowercase()))
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    if let Some(number) = value.as_f64() {
+        return Some(number);
+    }
+    value.as_str()?.trim().parse::<f64>().ok()
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    if let Some(number) = value.as_u64() {
+        return Some(number);
+    }
+    value.as_str()?.trim().parse::<u64>().ok()
+}
+
+fn object_f64(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_as_f64))
+}
+
+fn object_u64(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_as_u64))
+}
+
 fn read_github_copilot_account(scan_roots: &[PathBuf]) -> Account {
     let mut state_dbs = state_db_candidates(scan_roots);
     if !state_dbs.iter().any(|path| path.exists()) {
@@ -2718,14 +3184,22 @@ fn read_cursor_account(scan_roots: &[PathBuf]) -> Account {
             {
                 continue;
             }
-            let Some(parsed) = parse_json_value(&value) else {
-                continue;
-            };
+            let parsed = parse_json_or_nested_value(&value);
+            if display_name.is_none() && key_contains_ci(&key_lower, &display_keys[..5]) {
+                display_name = plain_display_value(&value);
+            }
             if display_name.is_none() {
-                display_name = find_string_deep_ci(&parsed, &display_keys);
+                if let Some(parsed) = parsed.as_ref() {
+                    display_name = find_string_deep_ci(parsed, &display_keys);
+                }
+            }
+            if plan_type.is_none() && key_contains_ci(&key_lower, &plan_keys) {
+                plan_type = plain_display_value(&value);
             }
             if plan_type.is_none() {
-                plan_type = find_string_deep_ci(&parsed, &plan_keys);
+                if let Some(parsed) = parsed.as_ref() {
+                    plan_type = find_string_deep_ci(parsed, &plan_keys);
+                }
             }
         }
     }
@@ -2760,6 +3234,33 @@ fn read_cursor_account(scan_roots: &[PathBuf]) -> Account {
     }
 }
 
+fn chatgpt_user_label_from_path(path: &Path) -> Option<String> {
+    for component in path.components() {
+        let text = component.as_os_str().to_string_lossy();
+        let Some(start) = text.find("user-") else {
+            continue;
+        };
+        let suffix = &text[start + "user-".len()..];
+        let user_id =
+            suffix
+                .split("__")
+                .next()
+                .unwrap_or(suffix)
+                .trim_matches(|character: char| {
+                    !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
+                });
+        if user_id.is_empty() {
+            continue;
+        }
+        let short_id = user_id.chars().take(8).collect::<String>();
+        if is_display_identifier(&short_id) {
+            return Some(format!("ChatGPT user {short_id}"));
+        }
+    }
+
+    None
+}
+
 fn read_chatgpt_account(scan_roots: &[PathBuf]) -> Account {
     let display_keys = [
         "email",
@@ -2779,33 +3280,29 @@ fn read_chatgpt_account(scan_roots: &[PathBuf]) -> Account {
     ];
     let mut display_name: Option<String> = None;
     let mut plan_type: Option<String> = None;
+    let mut local_user_label: Option<String> = None;
 
     for json_path in scan_roots.iter().filter(|path| path.exists()) {
-        let files = if json_path.is_file() {
-            vec![json_path.clone()]
-        } else {
-            WalkDir::new(json_path)
+        if local_user_label.is_none() {
+            local_user_label = chatgpt_user_label_from_path(json_path);
+        }
+        if local_user_label.is_none() && json_path.is_dir() {
+            local_user_label = WalkDir::new(json_path)
                 .max_depth(4)
                 .into_iter()
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-                .map(|entry| entry.path().to_path_buf())
-                .filter(|path| {
-                    let name = path.to_string_lossy().to_lowercase();
-                    name.ends_with(".json")
-                        && ["account", "profile", "user", "settings", "session", "auth"]
-                            .iter()
-                            .any(|needle| name.contains(needle))
-                })
-                .collect()
-        };
+                .find_map(|entry| chatgpt_user_label_from_path(entry.path()));
+        }
 
-        for file in files {
+        let mut read_account_file = |file: &Path| {
+            if local_user_label.is_none() {
+                local_user_label = chatgpt_user_label_from_path(file);
+            }
             let Ok(content) = fs::read_to_string(file) else {
-                continue;
+                return;
             };
             let Some(parsed) = parse_json_value(&content) else {
-                continue;
+                return;
             };
             if display_name.is_none() {
                 display_name = find_string_deep_ci(&parsed, &display_keys);
@@ -2813,18 +3310,46 @@ fn read_chatgpt_account(scan_roots: &[PathBuf]) -> Account {
             if plan_type.is_none() {
                 plan_type = find_string_deep_ci(&parsed, &plan_keys);
             }
+        };
+
+        if json_path.is_file() {
+            read_account_file(json_path);
+        } else {
+            for entry in WalkDir::new(json_path)
+                .max_depth(4)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let file = entry.path();
+                let name = file.to_string_lossy().to_lowercase();
+                if name.ends_with(".json")
+                    && ["account", "profile", "user", "settings", "session", "auth"]
+                        .iter()
+                        .any(|needle| name.contains(needle))
+                {
+                    read_account_file(file);
+                }
+            }
         }
     }
 
-    let display_name = display_name.unwrap_or_else(|| "ChatGPT".to_string());
+    let display_name = display_name
+        .or(local_user_label)
+        .unwrap_or_else(|| "ChatGPT".to_string());
     let plan_label = format_plan_label("ChatGPT", plan_type.as_deref());
+    let plan_monthly_usd = plan_monthly_usd(plan_type.as_deref());
 
     Account {
-        initials: initials_from_name(&display_name, "CG"),
+        initials: if display_name.starts_with("ChatGPT user ") {
+            "CG".to_string()
+        } else {
+            initials_from_name(&display_name, "CG")
+        },
         display_name,
         plan_type,
         plan_label,
-        plan_monthly_usd: None,
+        plan_monthly_usd,
     }
 }
 
@@ -2852,6 +3377,35 @@ fn cursor_default_candidates() -> Vec<PathBuf> {
         candidates.push(user_root.join("workspaceStorage"));
     }
     candidates
+}
+
+fn cursor_scan_roots_for_home(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.to_path_buf()];
+    if home.is_file() {
+        return roots;
+    }
+
+    let file_name = home.file_name().and_then(|name| name.to_str());
+    if matches!(file_name, Some("globalStorage" | "workspaceStorage")) {
+        if let Some(user_root) = home.parent() {
+            roots.push(user_root.join("globalStorage"));
+            roots.push(user_root.join("workspaceStorage"));
+        }
+    } else if file_name == Some("User") {
+        roots.push(home.join("globalStorage"));
+        roots.push(home.join("workspaceStorage"));
+    } else if let Some(parent) = home.parent() {
+        if parent.file_name().and_then(|name| name.to_str()) == Some("workspaceStorage") {
+            roots.push(parent.to_path_buf());
+            if let Some(user_root) = parent.parent() {
+                roots.push(user_root.join("globalStorage"));
+            }
+        }
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 fn cursor_home(settings: &Settings) -> PathBuf {
@@ -2889,7 +3443,7 @@ fn cursor_paths(settings: &Settings) -> (PathBuf, Vec<PathBuf>, Value) {
             .unwrap_or(false);
     let home = cursor_home(settings);
     let scan_roots = if configured {
-        vec![home.clone()]
+        cursor_scan_roots_for_home(&home)
     } else {
         let existing = cursor_default_candidates()
             .into_iter()
@@ -2926,6 +3480,128 @@ fn read_cursor_values_as_thread(
         "Cursor",
         "Cursor Workspace",
     )
+}
+
+fn cursor_header_token_estimate(object: &serde_json::Map<String, Value>) -> u64 {
+    let explicit = object_u64(
+        object,
+        &[
+            "total_tokens",
+            "totalTokens",
+            "tokenCount",
+            "tokensUsed",
+            "tokens",
+        ],
+    )
+    .unwrap_or(0);
+    if explicit > 0 {
+        return explicit;
+    }
+
+    if let Some(percent) = object_f64(object, &["contextUsagePercent"]) {
+        if percent > 0.0 {
+            return (percent * 100.0).round().max(1.0) as u64;
+        }
+    }
+
+    let changed_lines = object_u64(object, &["totalLinesAdded"]).unwrap_or(0)
+        + object_u64(object, &["totalLinesRemoved"]).unwrap_or(0);
+    changed_lines.saturating_mul(12)
+}
+
+fn cursor_workspace_from_header(object: &serde_json::Map<String, Value>) -> String {
+    object
+        .get("workspaceIdentifier")
+        .and_then(|value| find_string_deep(value, &["fsPath", "workspacePath", "rootPath"]))
+        .or_else(|| {
+            object
+                .get("workspaceIdentifier")
+                .and_then(|value| find_string_deep(value, &["path"]))
+                .filter(|path| path.starts_with('/'))
+        })
+        .unwrap_or_default()
+}
+
+fn read_cursor_composer_headers(path: &Path, value: &Value) -> Vec<Thread> {
+    let headers = value
+        .get("allComposers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let mut threads = Vec::new();
+
+    for header in headers {
+        let Some(object) = header.as_object() else {
+            continue;
+        };
+        if object
+            .get("isDraft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(id) = object_string(object, &["composerId", "id"]).map(str::to_string) else {
+            continue;
+        };
+        let created_at_ms = object
+            .get("createdAt")
+            .and_then(timestamp_ms_from_value)
+            .or_else(|| {
+                object
+                    .get("lastUpdatedAt")
+                    .and_then(timestamp_ms_from_value)
+            })
+            .unwrap_or(0);
+        let updated_at_ms = object
+            .get("lastUpdatedAt")
+            .and_then(timestamp_ms_from_value)
+            .or_else(|| {
+                object
+                    .get("conversationCheckpointLastUpdatedAt")
+                    .and_then(timestamp_ms_from_value)
+            })
+            .unwrap_or(created_at_ms);
+        let tokens_used = cursor_header_token_estimate(object);
+        let model = object_string(object, &["unifiedMode", "forceMode"])
+            .map(|mode| format!("Cursor {mode}"))
+            .unwrap_or_else(|| "Cursor".to_string());
+        let event = UsageEvent {
+            thread_id: id.clone(),
+            timestamp_ms: updated_at_ms,
+            model: model.clone(),
+            total_tokens: tokens_used,
+            plan_type: None,
+            rate_limits: None,
+        };
+
+        threads.push(Thread {
+            id: id.clone(),
+            title: object_string(object, &["name", "title"])
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!("Cursor session {}", id.chars().take(8).collect::<String>())
+                }),
+            source: "Cursor Composer".to_string(),
+            model,
+            cwd: cursor_workspace_from_header(object),
+            archived: object
+                .get("isArchived")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            tokens_used,
+            created_at_ms,
+            updated_at_ms,
+            rollout_path: path.to_string_lossy().to_string(),
+            usage_events: if tokens_used > 0 {
+                vec![event]
+            } else {
+                Vec::new()
+            },
+        });
+    }
+
+    threads
 }
 
 fn read_cursor_jsonish_file(path: &Path) -> Option<Thread> {
@@ -2965,26 +3641,66 @@ fn read_cursor_sqlite_threads(path: &Path) -> Vec<Thread> {
         return Vec::new();
     };
 
-    rows.filter_map(Result::ok)
-        .filter_map(|(key, value)| {
-            let searchable = format!("{} {}", key, value).to_lowercase();
-            if ![
-                "cursor",
-                "chat",
-                "composer",
-                "aichat",
-                "ai_chat",
-                "workbench.panel.aichat",
-            ]
-            .iter()
-            .any(|needle| searchable.contains(needle))
-            {
-                return None;
-            }
-            let parsed = serde_json::from_str::<Value>(&value).ok()?;
-            read_cursor_values_as_thread(path, vec![parsed], Some(&key))
-        })
-        .collect()
+    let mut threads = Vec::new();
+    for (key, value) in rows.filter_map(Result::ok) {
+        let searchable = format!("{} {}", key, value).to_lowercase();
+        if ![
+            "cursor",
+            "chat",
+            "composer",
+            "aichat",
+            "ai_chat",
+            "workbench.panel.aichat",
+        ]
+        .iter()
+        .any(|needle| searchable.contains(needle))
+        {
+            continue;
+        }
+        let Some(parsed) = parse_json_or_nested_value(&value) else {
+            continue;
+        };
+        if key == "composer.composerHeaders" {
+            threads.extend(read_cursor_composer_headers(path, &parsed));
+        } else if let Some(thread) = read_cursor_values_as_thread(path, vec![parsed], Some(&key)) {
+            threads.push(thread);
+        }
+    }
+
+    threads
+}
+
+fn scan_candidate_files(root: &Path, is_candidate: fn(&Path) -> bool) -> Vec<PathBuf> {
+    if root.is_file() {
+        return is_candidate(root)
+            .then(|| root.to_path_buf())
+            .into_iter()
+            .collect();
+    }
+
+    let mut visited_files = 0_usize;
+    let mut files = Vec::new();
+    for entry in WalkDir::new(root)
+        .max_depth(DEFAULT_SCAN_MAX_DEPTH)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        visited_files += 1;
+        if visited_files > DEFAULT_SCAN_MAX_FILES {
+            break;
+        }
+
+        let path = entry.path();
+        if is_candidate(path) {
+            files.push(path.to_path_buf());
+        }
+    }
+
+    files
 }
 
 fn is_cursor_data_file(path: &Path) -> bool {
@@ -3025,7 +3741,22 @@ fn is_chatgpt_data_file(path: &Path) -> bool {
         .to_lowercase();
 
     if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
-        return true;
+        let path_text = path.to_string_lossy().to_lowercase();
+        return [
+            "chatgpt",
+            "openai",
+            "conversation",
+            "message",
+            "com.openai.chat",
+        ]
+        .iter()
+        .any(|needle| path_text.contains(needle));
+    }
+    if extension == "data" {
+        return path
+            .to_string_lossy()
+            .to_lowercase()
+            .contains("conversations-v");
     }
     if !["json", "jsonl", "log"].contains(&extension.as_str()) {
         return false;
@@ -3061,6 +3792,21 @@ fn is_copilot_data_file(path: &Path) -> bool {
     path_text.contains("copilot") || path_text.contains("chat")
 }
 
+fn append_chatgpt_threads_from_path(threads: &mut Vec<Thread>, path: &Path) {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
+        threads.extend(read_chatgpt_sqlite_threads(path));
+    } else if extension == "data" {
+        threads.extend(read_chatgpt_data_file(path));
+    } else {
+        threads.extend(read_chatgpt_jsonish_file(path));
+    }
+}
+
 fn read_chatgpt_stats(settings: &Settings) -> Result<Stats, String> {
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = chatgpt_paths(settings);
@@ -3077,48 +3823,32 @@ fn read_chatgpt_stats(settings: &Settings) -> Result<Stats, String> {
 
     let mut threads = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        let files = if root.is_file() {
-            vec![root.clone()]
-        } else {
-            WalkDir::new(root)
-                .max_depth(8)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-                .map(|entry| entry.path().to_path_buf())
-                .collect()
-        };
-
-        for path in files.iter().filter(|path| is_chatgpt_data_file(path)) {
-            let extension = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
-                threads.extend(read_chatgpt_sqlite_threads(path));
-            } else {
-                threads.extend(read_chatgpt_jsonish_file(path));
-            }
+        for path in scan_candidate_files(root, is_chatgpt_data_file) {
+            append_chatgpt_threads_from_path(&mut threads, &path);
         }
     }
 
     let account = read_chatgpt_account(&scan_roots);
     let pricing = Some(Pricing {
-        label: "ChatGPT local export estimate".to_string(),
-        url: Some("https://chatgpt.com/pricing/".to_string()),
+        label: "ChatGPT local activity estimate".to_string(),
+        url: None,
         checked_at: "2026-07-02".to_string(),
     });
 
-    Ok(build_stats_from_threads(
+    let estimated_rate_limits = build_chatgpt_estimated_rate_limits(&threads, Local::now());
+    let mut stats = build_stats_from_threads(
         threads,
         Local::now(),
         chart_days,
         account,
         pricing,
+        None,
         false,
         paths,
-    ))
+    );
+    stats.rate_limits = estimated_rate_limits;
+
+    Ok(stats)
 }
 
 fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
@@ -3140,19 +3870,15 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
 
     let mut threads = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        for entry in WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| is_copilot_data_file(entry.path()))
-        {
-            if entry
+        for path in scan_candidate_files(root, is_copilot_data_file) {
+            if path
                 .file_name()
-                .to_string_lossy()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
                 .eq_ignore_ascii_case("state.vscdb")
             {
-                threads.extend(read_copilot_sqlite_threads(entry.path()));
-            } else if let Some(thread) = read_copilot_jsonish_file(entry.path()) {
+                threads.extend(read_copilot_sqlite_threads(&path));
+            } else if let Some(thread) = read_copilot_jsonish_file(&path) {
                 threads.push(thread);
             }
         }
@@ -3160,8 +3886,8 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
 
     let account = read_github_copilot_account(&scan_roots);
     let pricing = Some(Pricing {
-        label: "Local token estimate".to_string(),
-        url: Some("https://github.com/features/copilot/plans".to_string()),
+        label: "GitHub Copilot local token estimate".to_string(),
+        url: None,
         checked_at: "2026-06-30".to_string(),
     });
 
@@ -3171,6 +3897,7 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
         chart_days,
         account,
         pricing,
+        None,
         false,
         paths,
     ))
@@ -3195,19 +3922,15 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
 
     let mut threads = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        for entry in WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| is_cursor_data_file(entry.path()))
-        {
-            if entry
+        for path in scan_candidate_files(root, is_cursor_data_file) {
+            if path
                 .file_name()
-                .to_string_lossy()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
                 .eq_ignore_ascii_case("state.vscdb")
             {
-                threads.extend(read_cursor_sqlite_threads(entry.path()));
-            } else if let Some(thread) = read_cursor_jsonish_file(entry.path()) {
+                threads.extend(read_cursor_sqlite_threads(&path));
+            } else if let Some(thread) = read_cursor_jsonish_file(&path) {
                 threads.push(thread);
             }
         }
@@ -3215,8 +3938,8 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
 
     let account = read_cursor_account(&scan_roots);
     let pricing = Some(Pricing {
-        label: "Local token estimate".to_string(),
-        url: Some("https://cursor.com/pricing".to_string()),
+        label: "Cursor local token estimate".to_string(),
+        url: None,
         checked_at: "2026-06-30".to_string(),
     });
 
@@ -3226,6 +3949,7 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
         chart_days,
         account,
         pricing,
+        None,
         false,
         paths,
     ))
@@ -3284,6 +4008,154 @@ mod tests {
         let normalized = normalize_settings(settings);
 
         assert_eq!(normalized.chart_days, MAX_CHART_DAYS);
+    }
+
+    #[test]
+    fn normalize_settings_caps_auto_refresh_minutes() {
+        let mut settings = default_settings();
+        settings.auto_refresh_enabled = true;
+        settings.auto_refresh_minutes = MAX_AUTO_REFRESH_MINUTES + 1;
+
+        let normalized = normalize_settings(settings);
+
+        assert!(normalized.auto_refresh_enabled);
+        assert_eq!(normalized.auto_refresh_minutes, MAX_AUTO_REFRESH_MINUTES);
+    }
+
+    #[test]
+    fn normalize_settings_keeps_auto_refresh_minutes_positive() {
+        let mut settings = default_settings();
+        settings.auto_refresh_minutes = 0;
+
+        let normalized = normalize_settings(settings);
+
+        assert_eq!(normalized.auto_refresh_minutes, 1);
+    }
+
+    #[test]
+    fn rank_by_tokens_with_other_groups_items_after_top_four() {
+        let ranked = rank_by_tokens_with_other(
+            [
+                ("model-a".to_string(), 100),
+                ("model-b".to_string(), 90),
+                ("model-c".to_string(), 80),
+                ("model-d".to_string(), 70),
+                ("model-e".to_string(), 60),
+                ("model-f".to_string(), 50),
+            ],
+            4,
+            "其他",
+        );
+
+        assert_eq!(ranked.len(), 5);
+        assert_eq!(ranked[0].name, "model-a");
+        assert_eq!(ranked[3].name, "model-d");
+        assert_eq!(ranked[4].name, "其他");
+        assert_eq!(ranked[4].value, 110);
+    }
+
+    #[test]
+    fn build_stats_without_pricing_reports_tokens_without_costs() {
+        let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let timestamp_ms = DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let thread = Thread {
+            id: "local-one".to_string(),
+            title: "Local estimate".to_string(),
+            source: "Local".to_string(),
+            model: "local-model".to_string(),
+            cwd: String::new(),
+            archived: false,
+            tokens_used: 1200,
+            created_at_ms: timestamp_ms,
+            updated_at_ms: timestamp_ms,
+            rollout_path: String::new(),
+            usage_events: vec![UsageEvent {
+                thread_id: "local-one".to_string(),
+                timestamp_ms,
+                model: "local-model".to_string(),
+                total_tokens: 1200,
+                plan_type: None,
+                rate_limits: None,
+            }],
+        };
+
+        let stats = build_stats_from_threads(
+            vec![thread],
+            now,
+            30,
+            test_account(),
+            None,
+            None,
+            false,
+            json!({ "test": true }),
+        );
+
+        assert_eq!(stats.featured.today_tokens, 1200);
+        assert_eq!(stats.featured.period_tokens, 1200);
+        assert!(!stats.featured.cost_available);
+        assert_eq!(stats.featured.today_cost, 0.0);
+        assert_eq!(stats.featured.period_cost, 0.0);
+        assert_eq!(stats.daily_series[29].cost, 0.0);
+    }
+
+    #[test]
+    fn quarantine_invalid_settings_renames_original_file() {
+        let settings_file = temp_jsonl_path("settings.json");
+        let settings_dir = settings_file.parent().unwrap().to_path_buf();
+        fs::write(&settings_file, "{ invalid json").expect("invalid settings should be written");
+
+        quarantine_invalid_settings(&settings_file);
+
+        assert!(!settings_file.exists());
+        let backups = fs::read_dir(&settings_dir)
+            .expect("settings dir should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.invalid-")
+            })
+            .count();
+        assert_eq!(backups, 1);
+
+        let _ = fs::remove_dir_all(settings_dir);
+    }
+
+    #[test]
+    fn unique_settings_temp_path_avoids_reusing_same_name() {
+        let settings_file = temp_jsonl_path("settings.json");
+        let first = unique_settings_temp_path(&settings_file);
+        let second = unique_settings_temp_path(&settings_file);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), settings_file.parent());
+        assert_eq!(second.parent(), settings_file.parent());
+
+        let _ = fs::remove_dir_all(settings_file.parent().unwrap());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn replace_settings_file_overwrites_existing_file() {
+        let settings_file = temp_jsonl_path("settings.json");
+        let temp_file = unique_settings_temp_path(&settings_file);
+        fs::write(&settings_file, "old").expect("old settings should be written");
+        fs::write(&temp_file, "new").expect("new settings should be written");
+
+        replace_settings_file(&temp_file, &settings_file).expect("settings should be replaced");
+
+        assert_eq!(
+            fs::read_to_string(&settings_file).expect("settings should be readable"),
+            "new"
+        );
+        assert!(!temp_file.exists());
+
+        let _ = fs::remove_dir_all(settings_file.parent().unwrap());
     }
 
     fn temp_jsonl_path(name: &str) -> PathBuf {
@@ -3410,7 +4282,10 @@ mod tests {
 
         let events = read_codex_usage_events(&[thread.clone()]);
         assert_eq!(events.len(), 4);
-        assert_eq!(events.iter().map(|event| event.total_tokens).sum::<u64>(), 150);
+        assert_eq!(
+            events.iter().map(|event| event.total_tokens).sum::<u64>(),
+            150
+        );
         assert_eq!(events[0].total_tokens, 0);
         assert_eq!(events[1].total_tokens, 100);
         assert_eq!(events[2].total_tokens, 0);
@@ -3426,6 +4301,7 @@ mod tests {
             30,
             test_account(),
             None,
+            Some(CODEX_USD_PER_MILLION_TOKENS),
             true,
             json!({ "test": true }),
         );
@@ -3515,6 +4391,7 @@ mod tests {
             30,
             test_account(),
             None,
+            Some(CODEX_USD_PER_MILLION_TOKENS),
             true,
             json!({ "test": true }),
         );
@@ -3522,7 +4399,7 @@ mod tests {
         assert_eq!(stats.totals.threads, 2);
         assert_eq!(stats.totals.active_threads, 1);
         assert_eq!(stats.totals.archived_threads, 1);
-        assert_eq!(stats.totals.total_tokens, 1500);
+        assert_eq!(stats.totals.total_tokens, 1700);
         assert_eq!(stats.featured.period_tokens, 1700);
         assert_eq!(stats.featured.period_cost, 0.0017);
         assert_eq!(stats.featured.latest_token_usage, 1500);
@@ -3547,6 +4424,33 @@ mod tests {
         assert_eq!(stats.daily_series.len(), 30);
         assert_eq!(stats.daily_series[28].threads, 1);
         assert_eq!(stats.latest_threads[0].id, "one");
+        assert_eq!(stats.latest_threads[0].tokens_used, 1500);
+    }
+
+    #[test]
+    fn scan_candidate_files_limits_visited_files_before_matching() {
+        let root = temp_jsonl_path("scan-root");
+        fs::create_dir_all(&root).expect("scan root should be created");
+        fs::write(root.join("notes.txt"), "not a data file").expect("non-candidate should exist");
+        fs::write(root.join("copilot-chat.jsonl"), "{}").expect("candidate should exist");
+
+        let files = scan_candidate_files(&root, is_copilot_data_file);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|name| name.to_str()),
+            Some("copilot-chat.jsonl")
+        );
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn chatgpt_sqlite_candidates_require_chatgpt_context() {
+        assert!(!is_chatgpt_data_file(Path::new("/tmp/random/cache.db")));
+        assert!(is_chatgpt_data_file(Path::new(
+            "/tmp/com.openai.chat/workspace/conversations.db"
+        )));
     }
 
     #[test]
@@ -3653,6 +4557,99 @@ mod tests {
         assert_eq!(account.plan_label, "Claude.ai account");
 
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn read_claude_account_prefers_subscription_plan_over_user_type() {
+        let telemetry_file = temp_jsonl_path("events.json");
+        let home = telemetry_file.parent().unwrap().to_path_buf();
+        let telemetry_dir = home.join("telemetry");
+        fs::create_dir_all(&telemetry_dir).expect("telemetry dir should be created");
+        let telemetry_file = telemetry_dir.join("events.json");
+        let row = json!({
+          "event_data": {
+            "client_timestamp": "2026-06-30T10:00:00.000Z",
+            "email": "paid@example.com",
+            "user_type": "external",
+            "subscription_type": "max",
+            "env": { "is_claude_ai_auth": true }
+          }
+        });
+        let mut file = File::create(&telemetry_file).expect("telemetry file should be created");
+        writeln!(file, "{row}").expect("telemetry row should be written");
+
+        let account = read_claude_account(&home);
+
+        assert_eq!(account.display_name, "paid@example.com");
+        assert_eq!(account.plan_type.as_deref(), Some("max"));
+        assert_eq!(account.plan_label, "Claude Max");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn read_claude_account_keeps_older_plan_when_latest_identity_has_no_plan() {
+        let telemetry_file = temp_jsonl_path("events.json");
+        let home = telemetry_file.parent().unwrap().to_path_buf();
+        let telemetry_dir = home.join("telemetry");
+        fs::create_dir_all(&telemetry_dir).expect("telemetry dir should be created");
+        let telemetry_file = telemetry_dir.join("events.json");
+        let rows = [
+            json!({
+              "event_data": {
+                "client_timestamp": "2026-06-30T09:00:00.000Z",
+                "email": "paid@example.com",
+                "user_type": "external",
+                "organizationRateLimitTier": "default_claude_max_5x",
+                "env": { "is_claude_ai_auth": true }
+              }
+            }),
+            json!({
+              "event_data": {
+                "client_timestamp": "2026-06-30T10:00:00.000Z",
+                "email": "latest@example.com",
+                "user_type": "external",
+                "env": { "is_claude_ai_auth": true }
+              }
+            }),
+        ];
+        let mut file = File::create(&telemetry_file).expect("telemetry file should be created");
+        for row in rows {
+            writeln!(file, "{row}").expect("telemetry row should be written");
+        }
+
+        let account = read_claude_account(&home);
+
+        assert_eq!(account.display_name, "latest@example.com");
+        assert_eq!(account.plan_type.as_deref(), Some("default_claude_max_5x"));
+        assert_eq!(account.plan_label, "Claude Max 5x");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn read_claude_account_uses_config_rate_limit_tier() {
+        let home = temp_jsonl_path("claude-home");
+        fs::create_dir_all(&home).expect("claude home should be created");
+        let config_path = home.parent().unwrap().join(".claude.json");
+        fs::write(
+            config_path,
+            json!({
+              "primaryAccount": {
+                "organizationRateLimitTier": "default_claude_max_5x",
+                "billingType": "apple_subscription"
+              }
+            })
+            .to_string(),
+        )
+        .expect("claude config should be written");
+
+        let account = read_claude_account(&home);
+
+        assert_eq!(account.plan_type.as_deref(), Some("default_claude_max_5x"));
+        assert_eq!(account.plan_label, "Claude Max 5x");
+
+        let _ = fs::remove_dir_all(home.parent().unwrap());
     }
 
     #[test]
@@ -3797,6 +4794,113 @@ mod tests {
     }
 
     #[test]
+    fn read_chatgpt_data_file_uses_desktop_cache_metadata() {
+        let file_path = temp_jsonl_path("conversation.data");
+        let conversations_dir = file_path
+            .parent()
+            .unwrap()
+            .join("conversations-v3-user")
+            .join("chatgpt-cache-one.data");
+        fs::create_dir_all(conversations_dir.parent().unwrap())
+            .expect("conversation cache dir should be created");
+        let mut file = File::create(&conversations_dir).expect("chatgpt data file should exist");
+        file.write_all(&[42_u8; 128])
+            .expect("chatgpt data should be written");
+
+        let session =
+            read_chatgpt_data_file(&conversations_dir).expect("chatgpt data session should parse");
+
+        assert_eq!(session.id, "chatgpt-cache-one");
+        assert_eq!(session.source, "ChatGPT Desktop");
+        assert_eq!(session.model, "ChatGPT");
+        assert_eq!(session.tokens_used, 32);
+        assert_eq!(session.usage_events.len(), 1);
+        assert!(is_chatgpt_data_file(&conversations_dir));
+
+        let _ = fs::remove_dir_all(file_path.parent().unwrap());
+    }
+
+    #[test]
+    fn read_chatgpt_account_uses_user_scoped_directory() {
+        let root = temp_jsonl_path("root");
+        fs::create_dir_all(root.join("workspace-data").join("user-local123__workspace"))
+            .expect("chatgpt user-scoped directory should be created");
+
+        let account = read_chatgpt_account(&[root.clone()]);
+
+        assert_eq!(account.display_name, "ChatGPT user local123");
+        assert_eq!(account.initials, "CG");
+        assert_eq!(account.plan_label, "ChatGPT");
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn build_chatgpt_estimated_rate_limits_uses_recent_activity() {
+        let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let recent_ms = DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let older_ms = DateTime::parse_from_rfc3339("2026-06-29T11:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let threads = vec![
+            Thread {
+                id: "chatgpt-one".to_string(),
+                title: "Recent".to_string(),
+                source: "ChatGPT Desktop".to_string(),
+                model: "ChatGPT".to_string(),
+                cwd: String::new(),
+                archived: false,
+                tokens_used: 32,
+                created_at_ms: recent_ms,
+                updated_at_ms: recent_ms,
+                rollout_path: String::new(),
+                usage_events: vec![UsageEvent {
+                    thread_id: "chatgpt-one".to_string(),
+                    timestamp_ms: recent_ms,
+                    model: "ChatGPT".to_string(),
+                    total_tokens: 32,
+                    plan_type: None,
+                    rate_limits: None,
+                }],
+            },
+            Thread {
+                id: "chatgpt-two".to_string(),
+                title: "Older".to_string(),
+                source: "ChatGPT Desktop".to_string(),
+                model: "ChatGPT".to_string(),
+                cwd: String::new(),
+                archived: false,
+                tokens_used: 12,
+                created_at_ms: older_ms,
+                updated_at_ms: older_ms,
+                rollout_path: String::new(),
+                usage_events: vec![UsageEvent {
+                    thread_id: "chatgpt-two".to_string(),
+                    timestamp_ms: older_ms,
+                    model: "ChatGPT".to_string(),
+                    total_tokens: 12,
+                    plan_type: None,
+                    rate_limits: None,
+                }],
+            },
+        ];
+
+        let limits =
+            build_chatgpt_estimated_rate_limits(&threads, now).expect("limits should exist");
+
+        assert_eq!(limits.plan_type.as_deref(), Some("local_estimate"));
+        assert_eq!(limits.windows.len(), 2);
+        assert_eq!(limits.windows[0].window_minutes, 180);
+        assert!((limits.windows[0].used_percent - 1.25).abs() < f64::EPSILON);
+        assert_eq!(limits.windows[1].window_minutes, 10080);
+        assert!((limits.windows[1].used_percent - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn read_github_copilot_account_uses_vscode_state() {
         let db_path = temp_jsonl_path("state.vscdb");
         let global_storage = db_path.parent().unwrap().to_path_buf();
@@ -3865,6 +4969,154 @@ mod tests {
         assert_eq!(account.initials, "C");
         assert_eq!(account.plan_type.as_deref(), Some("pro"));
         assert_eq!(account.plan_label, "Cursor Pro");
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn cursor_scan_roots_include_workspace_sibling_for_configured_global_storage() {
+        let user_root = temp_jsonl_path("User");
+        let global_storage = user_root.join("globalStorage");
+        let workspace_storage = user_root.join("workspaceStorage");
+
+        let roots = cursor_scan_roots_for_home(&global_storage);
+
+        assert!(roots.contains(&global_storage));
+        assert!(roots.contains(&workspace_storage));
+
+        let _ = fs::remove_dir_all(user_root.parent().unwrap());
+    }
+
+    #[test]
+    fn read_cursor_account_uses_plain_state_identity() {
+        let db_path = temp_jsonl_path("state.vscdb");
+        let storage = db_path.parent().unwrap().to_path_buf();
+        let connection = Connection::open(&db_path).expect("state db should be created");
+        connection
+            .execute(
+                "create table ItemTable (key text primary key, value text)",
+                [],
+            )
+            .expect("item table should be created");
+        connection
+            .execute(
+                "insert into ItemTable (key, value) values (?1, ?2)",
+                rusqlite::params!["cursorAuth/cachedEmail", "cursor-user@example.com"],
+            )
+            .expect("cursor email row should be inserted");
+        connection
+            .execute(
+                "insert into ItemTable (key, value) values (?1, ?2)",
+                rusqlite::params!["cursorMembershipType", "pro"],
+            )
+            .expect("cursor plan row should be inserted");
+
+        let account = read_cursor_account(&[storage.clone()]);
+
+        assert_eq!(account.display_name, "cursor-user@example.com");
+        assert_eq!(account.initials, "C");
+        assert_eq!(account.plan_type.as_deref(), Some("pro"));
+        assert_eq!(account.plan_label, "Cursor Pro");
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn read_cursor_sqlite_threads_parses_nested_json_string_values() {
+        let db_path = temp_jsonl_path("state.vscdb");
+        let storage = db_path.parent().unwrap().to_path_buf();
+        let connection = Connection::open(&db_path).expect("state db should be created");
+        connection
+            .execute(
+                "create table ItemTable (key text primary key, value text)",
+                [],
+            )
+            .expect("item table should be created");
+        let chat_value = json!({
+          "conversationId": "cursor-state-one",
+          "title": "Cursor state chat",
+          "workspacePath": "/work/cursor-state",
+          "messages": [
+            {
+              "role": "assistant",
+              "timestamp": "2026-06-30T10:00:00.000Z",
+              "text": "Cursor response from state storage."
+            }
+          ]
+        });
+        connection
+            .execute(
+                "insert into ItemTable (key, value) values (?1, ?2)",
+                rusqlite::params![
+                    "workbench.panel.aichat.view.aichat.chatdata",
+                    serde_json::to_string(&serde_json::to_string(&chat_value).unwrap()).unwrap()
+                ],
+            )
+            .expect("cursor chat row should be inserted");
+
+        let threads = read_cursor_sqlite_threads(&db_path);
+
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "cursor-state-one");
+        assert_eq!(threads[0].title, "Cursor state chat");
+        assert_eq!(threads[0].tokens_used, 8);
+
+        let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn read_cursor_sqlite_threads_uses_composer_headers() {
+        let db_path = temp_jsonl_path("state.vscdb");
+        let storage = db_path.parent().unwrap().to_path_buf();
+        let connection = Connection::open(&db_path).expect("state db should be created");
+        connection
+            .execute(
+                "create table ItemTable (key text primary key, value text)",
+                [],
+            )
+            .expect("item table should be created");
+        let headers = json!({
+          "allComposers": [
+            {
+              "type": "head",
+              "composerId": "cursor-header-one",
+              "name": "Project in-depth review",
+              "createdAt": 1783043837156_i64,
+              "lastUpdatedAt": 1783043837320_i64,
+              "contextUsagePercent": 36.5,
+              "unifiedMode": "agent",
+              "workspaceIdentifier": {
+                "uri": {
+                  "fsPath": "/Users/example/project",
+                  "path": "/Users/example/project"
+                }
+              }
+            },
+            {
+              "type": "head",
+              "composerId": "empty-state-draft",
+              "isDraft": true,
+              "createdAt": 1783043462141_i64
+            }
+          ]
+        });
+        connection
+            .execute(
+                "insert into ItemTable (key, value) values (?1, ?2)",
+                rusqlite::params!["composer.composerHeaders", headers.to_string()],
+            )
+            .expect("cursor composer headers row should be inserted");
+
+        let threads = read_cursor_sqlite_threads(&db_path);
+
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "cursor-header-one");
+        assert_eq!(threads[0].title, "Project in-depth review");
+        assert_eq!(threads[0].source, "Cursor Composer");
+        assert_eq!(threads[0].model, "Cursor agent");
+        assert_eq!(threads[0].cwd, "/Users/example/project");
+        assert_eq!(threads[0].tokens_used, 3650);
+        assert_eq!(threads[0].usage_events.len(), 1);
 
         let _ = fs::remove_dir_all(storage);
     }

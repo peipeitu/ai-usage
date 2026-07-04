@@ -5,8 +5,22 @@ const ISSUE_URL = "https://github.com/peipeitu/ai-usage/issues";
 const MIN_CHART_DAYS = 7;
 const DEFAULT_CHART_DAYS = 30;
 const MAX_CHART_DAYS = 90;
+const DEFAULT_AUTO_REFRESH_ENABLED = false;
+const DEFAULT_AUTO_REFRESH_MINUTES = 30;
+const MAX_AUTO_REFRESH_MINUTES = 1440;
+const MAX_STATS_CACHE_ENTRIES = 10;
+
+function detectPlatform() {
+  const platform = navigator.userAgentData?.platform || navigator.platform || "";
+  const normalized = platform.toLowerCase();
+  if (normalized.includes("mac")) return "darwin";
+  if (normalized.includes("win")) return "windows";
+  if (normalized.includes("linux")) return "linux";
+  return normalized || "unknown";
+}
+
 const aiUsage = window.aiUsage || {
-  platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : navigator.platform.toLowerCase(),
+  platform: detectPlatform(),
   getStats: (provider) => tauriCore.invoke("get_stats", { provider }),
   chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
   getSettings: () => tauriCore.invoke("get_settings"),
@@ -41,7 +55,9 @@ let currentSettings = {
   language: "auto",
   theme: "system",
   accentColor: "blue",
-  chartDays: DEFAULT_CHART_DAYS
+  chartDays: DEFAULT_CHART_DAYS,
+  autoRefreshEnabled: DEFAULT_AUTO_REFRESH_ENABLED,
+  autoRefreshMinutes: DEFAULT_AUTO_REFRESH_MINUTES
 };
 let currentView = "home";
 let activeSettingsSectionId = "settingsGeneralSection";
@@ -50,6 +66,11 @@ let latestStatsRequestId = 0;
 let currentLoading = false;
 let updateInfo = { supported: false, available: false, version: null };
 let updateInstalling = false;
+let rateLimitCountdownTimer = null;
+let settingsSavedAt = new Date();
+let autoRefreshTimer = null;
+let autoRefreshCountdownTimer = null;
+let autoRefreshDueAt = null;
 const statsCache = new Map();
 
 function normalizeChartDays(value, fallback = DEFAULT_CHART_DAYS) {
@@ -58,6 +79,14 @@ function normalizeChartDays(value, fallback = DEFAULT_CHART_DAYS) {
     return fallback;
   }
   return Math.min(MAX_CHART_DAYS, Math.max(MIN_CHART_DAYS, Math.round(days)));
+}
+
+function normalizeAutoRefreshMinutes(value, fallback = DEFAULT_AUTO_REFRESH_MINUTES) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) {
+    return fallback;
+  }
+  return Math.min(MAX_AUTO_REFRESH_MINUTES, Math.max(1, Math.round(minutes)));
 }
 
 function defaultCopilotHome() {
@@ -94,26 +123,31 @@ const PROVIDERS = {
   codex: {
     label: "Codex",
     initials: "CD",
+    icon: "./assets/provider-codex.svg",
     defaultHome: "~/.codex"
   },
   claude: {
     label: "Claude Code",
     initials: "CC",
+    icon: "./assets/provider-claude.svg",
     defaultHome: "~/.claude"
   },
   copilot: {
     label: "GitHub Copilot",
     initials: "GH",
+    icon: "./assets/provider-copilot.svg",
     defaultHome: defaultCopilotHome()
   },
   cursor: {
     label: "Cursor",
     initials: "CU",
+    icon: "./assets/provider-cursor.svg",
     defaultHome: defaultCursorHome()
   },
   chatgpt: {
     label: "ChatGPT",
     initials: "CG",
+    icon: "./assets/provider-chatgpt.svg",
     defaultHome: defaultChatgptHome()
   }
 };
@@ -128,7 +162,7 @@ const I18N = {
     preferences: "偏好设置",
     backToApp: "返回应用",
     personal: "个人",
-    providers: "Providers",
+    providers: "AI 服务",
     general: "常规",
     appearance: "个性化",
     chart: "图表",
@@ -142,10 +176,18 @@ const I18N = {
     periodUsage: "周期用量",
     dataSource: "数据源",
     localEstimate: "本地日志估算",
+    localActivityEstimate: "本地活动估算",
+    localActivityEstimateHint: "基于本地会话活动推算，不代表 ChatGPT 官方限额。",
     todayCost: "今日费用",
     periodCost: "近 {days} 天费用",
+    todayTokens: "今日 token",
+    periodUsageTokens: "近 {days} 天 token",
     periodTokens: "近 {days} 天 token 用量",
+    periodAccumulated: "{days} 天累计",
+    periodTokenContext: "总 token {total} · 最近 {latest}",
     latestTokenUsage: "最近 token 用量",
+    latestTokenUsageShare: "最近 token 占当前周期 token 的 {percent}%",
+    latestTokenUsageHint: "如果今天有 token 记录，显示今日累计；否则显示最近一次 token 记录；没有 token 事件时使用最近会话估算。",
     threadsTotal: "总会话",
     threadsActive: "活跃",
     tokensTotal: "总 token",
@@ -155,12 +197,16 @@ const I18N = {
     sources: "运行来源",
     workspaces: "工作区",
     recentThreads: "最近会话",
-    settingsSaved: "已保存",
+    settingsSavedAt: "已保存 · {time}",
     updateAvailable: "更新到 {version}",
     installingUpdate: "正在更新",
     installUpdateError: "无法安装更新",
     enabledProviders: "启用 AI 服务",
     atLeastOneProvider: "至少启用一个 AI 服务",
+    autoRefresh: "自动更新",
+    autoRefreshEnabled: "启用",
+    autoRefreshSuffix: "分钟",
+    autoRefreshCountdown: "{time} 后刷新",
     dataFolder: "数据目录",
     chooseFolder: "选择目录",
     language: "语言",
@@ -182,6 +228,8 @@ const I18N = {
     emptyRateLimits: "暂无剩余用量数据",
     emptyRecentThreads: "暂无最近会话",
     updatedAt: "更新于 {date}",
+    updatesIn: "更新 {time}",
+    updatingSoon: "即将更新",
     percentUsage: "{percent}% {plan} 使用量",
     usageEstimated: "按本地日志估算",
     resetAt: "{label} · {time} 重置",
@@ -201,7 +249,7 @@ const I18N = {
     preferences: "Preferences",
     backToApp: "Back to app",
     personal: "Personal",
-    providers: "Providers",
+    providers: "AI services",
     general: "General",
     appearance: "Personalization",
     chart: "Chart",
@@ -215,10 +263,19 @@ const I18N = {
     periodUsage: "Period usage",
     dataSource: "Data source",
     localEstimate: "Local log estimate",
+    localActivityEstimate: "Local activity estimate",
+    localActivityEstimateHint: "Estimated from local conversation activity; it is not an official ChatGPT quota.",
     todayCost: "Today cost",
     periodCost: "{days}-day cost",
+    todayTokens: "Today tokens",
+    periodUsageTokens: "{days}-day tokens",
     periodTokens: "{days}-day token usage",
+    periodAccumulated: "{days}-day total",
+    periodTokenContext: "Total tokens {total} · latest {latest}",
     latestTokenUsage: "Latest token usage",
+    latestTokenUsageShare: "Latest token usage is {percent}% of the current period",
+    latestTokenUsageHint:
+      "Shows today's total when token events exist today; otherwise the latest token event, or the latest thread estimate.",
     threadsTotal: "Total threads",
     threadsActive: "Active",
     tokensTotal: "Total tokens",
@@ -228,12 +285,16 @@ const I18N = {
     sources: "Sources",
     workspaces: "Workspaces",
     recentThreads: "Recent threads",
-    settingsSaved: "Saved",
+    settingsSavedAt: "Saved · {time}",
     updateAvailable: "Update to {version}",
     installingUpdate: "Updating",
     installUpdateError: "Unable to install update",
     enabledProviders: "Enabled AI services",
     atLeastOneProvider: "Keep at least one AI service enabled",
+    autoRefresh: "Auto refresh",
+    autoRefreshEnabled: "Enabled",
+    autoRefreshSuffix: "min",
+    autoRefreshCountdown: "Refresh in {time}",
     dataFolder: "Data folder",
     chooseFolder: "Choose folder",
     language: "Language",
@@ -255,6 +316,8 @@ const I18N = {
     emptyRateLimits: "No remaining usage data",
     emptyRecentThreads: "No recent threads",
     updatedAt: "Updated {date}",
+    updatesIn: "Updates in {time}",
+    updatingSoon: "Updating soon",
     percentUsage: "{percent}% {plan} usage",
     usageEstimated: "Estimated from local logs",
     resetAt: "{label} · resets {time}",
@@ -298,6 +361,9 @@ const elements = {
   overviewSourceLabel: document.getElementById("overviewSourceLabel"),
   overviewEstimateLabel: document.getElementById("overviewEstimateLabel"),
   overviewPeriod: document.getElementById("overviewPeriod"),
+  overviewProviderLogo: document.getElementById("overviewProviderLogo"),
+  overviewAccountName: document.getElementById("overviewAccountName"),
+  overviewAccountPlan: document.getElementById("overviewAccountPlan"),
   sidebarRemainingUsage: document.getElementById("sidebarRemainingUsage"),
   sidebarPeriodMeta: document.getElementById("sidebarPeriodMeta"),
   viewEyebrow: document.getElementById("viewEyebrow"),
@@ -311,7 +377,9 @@ const elements = {
   periodCost: document.getElementById("periodCost"),
   periodUsagePercent: document.getElementById("periodUsagePercent"),
   periodTokens: document.getElementById("periodTokens"),
+  periodTokensContext: document.getElementById("periodTokensContext"),
   latestTokenUsage: document.getElementById("latestTokenUsage"),
+  latestTokenUsageMeter: document.getElementById("latestTokenUsageMeter"),
   todayCostLabel: document.getElementById("todayCostLabel"),
   periodCostLabel: document.getElementById("periodCostLabel"),
   periodTokensLabel: document.getElementById("periodTokensLabel"),
@@ -341,6 +409,7 @@ const elements = {
   recentThreads: document.getElementById("recentThreads"),
   updateButton: document.getElementById("updateButton"),
   refreshButton: document.getElementById("refreshButton"),
+  autoRefreshCountdown: document.getElementById("autoRefreshCountdown"),
   chooseCodexHomeButton: document.getElementById("chooseCodexHomeButton"),
   chooseClaudeHomeButton: document.getElementById("chooseClaudeHomeButton"),
   chooseCopilotHomeButton: document.getElementById("chooseCopilotHomeButton"),
@@ -373,6 +442,11 @@ const elements = {
   languageAutoOption: document.getElementById("languageAutoOption"),
   languageZhOption: document.getElementById("languageZhOption"),
   languageEnOption: document.getElementById("languageEnOption"),
+  autoRefreshLabel: document.getElementById("autoRefreshLabel"),
+  autoRefreshEnabledInput: document.getElementById("autoRefreshEnabledInput"),
+  autoRefreshEnabledLabel: document.getElementById("autoRefreshEnabledLabel"),
+  autoRefreshInput: document.getElementById("autoRefreshInput"),
+  autoRefreshSuffix: document.getElementById("autoRefreshSuffix"),
   themeLabel: document.getElementById("themeLabel"),
   themeSystemOption: document.getElementById("themeSystemOption"),
   themeLightOption: document.getElementById("themeLightOption"),
@@ -419,6 +493,17 @@ function isProviderEnabled(providerId, settings = currentSettings) {
 
 function firstEnabledProvider(settings = currentSettings) {
   return enabledProviders(settings)[0] || "codex";
+}
+
+function applyProviderEstimateText(providerId = currentSettings.activeProvider) {
+  const isChatgpt = providerId === "chatgpt";
+  elements.overviewEstimateLabel.textContent = isChatgpt ? t("localActivityEstimate") : t("localEstimate");
+  elements.overviewEstimateLabel.setAttribute(
+    "title",
+    isChatgpt ? t("localActivityEstimateHint") : t("localEstimate")
+  );
+  elements.rateLimitTitle.textContent = isChatgpt ? t("localActivityEstimate") : t("remainingUsage");
+  elements.rateLimitTitle.setAttribute("title", isChatgpt ? t("localActivityEstimateHint") : t("remainingUsage"));
 }
 
 function localeForLanguage() {
@@ -485,6 +570,133 @@ function formatResetTime(limit) {
   }).format(resetDate);
 }
 
+function formatCountdown(value) {
+  if (!value) return "-";
+  const resetDate = new Date(value);
+  if (Number.isNaN(resetDate.getTime())) return "-";
+
+  let remainingSeconds = Math.max(0, Math.ceil((resetDate.getTime() - Date.now()) / 1000));
+  if (remainingSeconds <= 0) return t("updatingSoon");
+
+  const days = Math.floor(remainingSeconds / 86400);
+  remainingSeconds -= days * 86400;
+  const hours = Math.floor(remainingSeconds / 3600);
+  remainingSeconds -= hours * 3600;
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds - minutes * 60;
+
+  if (currentLanguage() === "zh") {
+    if (days > 0) return `${days}天 ${hours}小时`;
+    if (hours > 0) return `${hours}小时 ${minutes}分`;
+    if (minutes > 0) return `${minutes}分 ${seconds}秒`;
+    return `${seconds}秒`;
+  }
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function formatUpdateCountdown(value) {
+  const countdown = formatCountdown(value);
+  return countdown === "-" ? "-" : t("updatesIn", { time: countdown });
+}
+
+function updateRateLimitCountdowns() {
+  const nodes = document.querySelectorAll("[data-reset-countdown]");
+  for (const node of nodes) {
+    node.textContent = formatUpdateCountdown(node.dataset.resetCountdown);
+  }
+  if (currentView !== "home" || nodes.length === 0) {
+    stopRateLimitCountdownTimer();
+  }
+}
+
+function startRateLimitCountdownTimer() {
+  if (rateLimitCountdownTimer !== null) return;
+  rateLimitCountdownTimer = window.setInterval(updateRateLimitCountdowns, 1000);
+}
+
+function stopRateLimitCountdownTimer() {
+  if (rateLimitCountdownTimer === null) return;
+  window.clearInterval(rateLimitCountdownTimer);
+  rateLimitCountdownTimer = null;
+}
+
+function syncRateLimitCountdownTimer() {
+  if (currentView === "home" && document.querySelector("[data-reset-countdown]")) {
+    startRateLimitCountdownTimer();
+  } else {
+    stopRateLimitCountdownTimer();
+  }
+}
+
+function stopAutoRefreshTimer() {
+  if (autoRefreshTimer !== null) {
+    window.clearTimeout(autoRefreshTimer);
+  }
+  autoRefreshTimer = null;
+  autoRefreshDueAt = null;
+  stopAutoRefreshCountdownTimer();
+  renderAutoRefreshCountdown();
+}
+
+function stopAutoRefreshCountdownTimer() {
+  if (autoRefreshCountdownTimer === null) return;
+  window.clearInterval(autoRefreshCountdownTimer);
+  autoRefreshCountdownTimer = null;
+}
+
+function renderAutoRefreshCountdown() {
+  const shouldShow = Boolean(currentView === "home" && currentSettings.autoRefreshEnabled && autoRefreshDueAt);
+  elements.autoRefreshCountdown.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  const text = t("autoRefreshCountdown", { time: formatCountdown(autoRefreshDueAt) });
+  elements.autoRefreshCountdown.textContent = text;
+  elements.autoRefreshCountdown.setAttribute("title", text);
+}
+
+function startAutoRefreshCountdownTimer() {
+  stopAutoRefreshCountdownTimer();
+  renderAutoRefreshCountdown();
+  if (!autoRefreshDueAt || !currentSettings.autoRefreshEnabled) return;
+  autoRefreshCountdownTimer = window.setInterval(renderAutoRefreshCountdown, 1000);
+}
+
+function autoRefreshDelayMs() {
+  if (!currentSettings.autoRefreshEnabled) {
+    return 0;
+  }
+  const minutes = normalizeAutoRefreshMinutes(currentSettings.autoRefreshMinutes);
+  return minutes * 60 * 1000;
+}
+
+function scheduleAutoRefreshTimer() {
+  stopAutoRefreshTimer();
+  const delay = autoRefreshDelayMs();
+  if (delay <= 0) return;
+  autoRefreshDueAt = new Date(Date.now() + delay);
+  startAutoRefreshCountdownTimer();
+  autoRefreshTimer = window.setTimeout(async () => {
+    autoRefreshTimer = null;
+    autoRefreshDueAt = null;
+    stopAutoRefreshCountdownTimer();
+    renderAutoRefreshCountdown();
+    if (currentLoading) {
+      scheduleAutoRefreshTimer();
+      return;
+    }
+    await refreshStats({ force: true, showLoading: false });
+    scheduleAutoRefreshTimer();
+  }, delay);
+}
+
+function resetAutoRefreshTimer() {
+  scheduleAutoRefreshTimer();
+}
+
 function primaryRateLimit(stats) {
   return stats.rateLimits?.windows?.[0] || null;
 }
@@ -519,6 +731,15 @@ function displaySourceName(name) {
   return name;
 }
 
+function statsRatioPercent(value, total) {
+  const numerator = Number(value);
+  const denominator = Number(total);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return (numerator / denominator) * 100;
+}
+
 function formatDate(value) {
   if (!value) return "-";
   return new Intl.DateTimeFormat(localeForLanguage(), {
@@ -527,6 +748,56 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat(localeForLanguage(), {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function renderSettingsStatus() {
+  elements.settingsStatus.textContent = t("settingsSavedAt", { time: formatTime(settingsSavedAt) });
+}
+
+function updateLatestTokenUsageMeter(percent) {
+  const normalized = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
+  const visiblePercent = normalized > 0 ? Math.max(3, normalized) : 0;
+  const rounded = Math.round(normalized);
+  const label = t("latestTokenUsageShare", { percent: rounded });
+  elements.latestTokenUsageMeter.style.setProperty("--latest-token-progress", `${visiblePercent}%`);
+  elements.latestTokenUsageMeter.setAttribute("aria-valuenow", String(rounded));
+  elements.latestTokenUsageMeter.setAttribute("aria-label", label);
+  elements.latestTokenUsageMeter.setAttribute("title", label);
+}
+
+function costMetricsAvailable(stats = lastStats) {
+  if (typeof stats?.featured?.costAvailable === "boolean") {
+    return stats.featured.costAvailable;
+  }
+  return currentSettings.activeProvider === "codex";
+}
+
+function renderCostMetricLabels(chartDays, stats = lastStats) {
+  if (costMetricsAvailable(stats)) {
+    elements.todayCostLabel.textContent = t("todayCost");
+    elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  } else {
+    elements.todayCostLabel.textContent = t("todayTokens");
+    elements.periodCostLabel.textContent = t("periodUsageTokens", { days: chartDays });
+  }
+}
+
+function renderCostMetricValues(stats) {
+  if (costMetricsAvailable(stats)) {
+    elements.todayCost.textContent = formatCurrency(stats.featured.todayCost);
+    elements.periodCost.textContent = formatCurrency(stats.featured.periodCost);
+  } else {
+    elements.todayCost.textContent = formatCompact(stats.featured.todayTokens || 0);
+    elements.periodCost.textContent = formatCompact(stats.featured.periodTokens || 0);
+  }
 }
 
 function applyLanguage() {
@@ -563,18 +834,28 @@ function applyLanguage() {
   elements.updateButton.setAttribute("title", t("updateAvailable", { version: updateInfo.version || "" }).trim());
   elements.refreshButton.setAttribute("aria-label", t("refresh"));
   elements.refreshButton.setAttribute("title", t("refresh"));
+  renderAutoRefreshCountdown();
   elements.overviewSourceLabel.textContent = t("dataSource");
-  elements.overviewEstimateLabel.textContent = t("localEstimate");
-  elements.todayCostLabel.textContent = t("todayCost");
-  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  applyProviderEstimateText();
+  renderCostMetricLabels(chartDays);
   elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.periodUsagePercent.dataset.periodLabel = t("periodAccumulated", { days: chartDays });
+  if (lastStats) {
+    elements.periodTokensContext.textContent = t("periodTokenContext", {
+      total: formatCompact(lastStats.totals.totalTokens),
+      latest: formatCompact(lastStats.featured.latestTokenUsage)
+    });
+  }
   elements.latestTokenUsageLabel.textContent = t("latestTokenUsage");
+  elements.latestTokenUsageLabel.setAttribute("title", t("latestTokenUsageHint"));
+  updateLatestTokenUsageMeter(
+    lastStats ? statsRatioPercent(lastStats.featured.latestTokenUsage, lastStats.featured.periodTokens) : 0
+  );
   elements.threadsTotalLabel.textContent = t("threadsTotal");
   elements.threadsActiveLabel.textContent = t("threadsActive");
   elements.tokensTotalLabel.textContent = t("tokensTotal");
   elements.updatedThisWeekLabel.textContent = t("updatedThisWeek");
   elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
-  elements.rateLimitTitle.textContent = t("remainingUsage");
   elements.modelTitle.textContent = t("models");
   elements.sourceTitle.textContent = t("sources");
   elements.workspaceTitle.textContent = t("workspaces");
@@ -609,6 +890,9 @@ function applyLanguage() {
   elements.languageAutoOption.textContent = t("followSystem");
   elements.languageZhOption.textContent = t("chinese");
   elements.languageEnOption.textContent = t("english");
+  elements.autoRefreshLabel.textContent = t("autoRefresh");
+  elements.autoRefreshEnabledLabel.textContent = t("autoRefreshEnabled");
+  elements.autoRefreshSuffix.textContent = t("autoRefreshSuffix");
   elements.themeLabel.textContent = t("theme");
   elements.themeSystemOption.textContent = t("followSystem");
   elements.themeLightOption.textContent = t("light");
@@ -667,6 +951,8 @@ function setView(view) {
   elements.viewEyebrow.textContent = isSettings ? t("preferences") : `${provider.label} ${t("usage")}`;
   elements.viewTitle.textContent = isSettings ? t("settings") : t("overview");
   renderUpdateButton();
+  renderAutoRefreshCountdown();
+  syncRateLimitCountdownTimer();
 }
 
 function settingsPanelGroupTitle(sectionId) {
@@ -729,7 +1015,12 @@ function statsCacheKey(providerId = currentSettings.activeProvider, settings = c
 }
 
 function cacheStats(providerId, stats, settings = currentSettings) {
-  statsCache.set(statsCacheKey(providerId, settings), stats);
+  const key = statsCacheKey(providerId, settings);
+  statsCache.delete(key);
+  statsCache.set(key, stats);
+  while (statsCache.size > MAX_STATS_CACHE_ENTRIES) {
+    statsCache.delete(statsCache.keys().next().value);
+  }
 }
 
 function cachedStats(providerId = currentSettings.activeProvider, settings = currentSettings) {
@@ -806,10 +1097,21 @@ function renderStatsSkeleton(providerId = currentSettings.activeProvider) {
   const provider = PROVIDERS[providerId] || PROVIDERS.codex;
   const chartDays = currentSettings.chartDays || 30;
   elements.overviewProvider.textContent = provider.label;
-  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  elements.overviewProviderLogo.src = provider.icon;
+  elements.overviewAccountName.textContent = provider.label;
+  elements.overviewAccountPlan.textContent = provider.label;
+  applyProviderEstimateText(providerId);
+  renderCostMetricLabels(chartDays, {
+    featured: {
+      costAvailable: providerId === "codex"
+    }
+  });
   elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.periodUsagePercent.dataset.periodLabel = t("periodAccumulated", { days: chartDays });
   elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
   elements.overviewPeriod.textContent = t("daysPeriod", { days: chartDays });
+  elements.periodTokens.closest(".hero-metric")?.style.setProperty("--usage-progress", "0%");
+  updateLatestTokenUsageMeter(0);
   elements.accountInitials.textContent = provider.initials;
   elements.accountName.textContent = provider.label;
   markSkeleton(elements.accountPlan, "64px");
@@ -817,6 +1119,7 @@ function renderStatsSkeleton(providerId = currentSettings.activeProvider) {
   markSkeleton(elements.periodCost, "86px");
   markSkeleton(elements.periodUsagePercent, "110px");
   markSkeleton(elements.periodTokens, "78px");
+  markSkeleton(elements.periodTokensContext, "172px");
   markSkeleton(elements.latestTokenUsage, "72px");
   markSkeleton(elements.threadsTotal, "48px");
   markSkeleton(elements.threadsActive, "48px");
@@ -851,6 +1154,13 @@ function renderSettings() {
   }
   renderProviderVisibility();
   elements.languageSelect.value = currentSettings.language;
+  currentSettings.autoRefreshEnabled = Boolean(currentSettings.autoRefreshEnabled);
+  currentSettings.autoRefreshMinutes = normalizeAutoRefreshMinutes(currentSettings.autoRefreshMinutes);
+  elements.autoRefreshEnabledInput.checked = currentSettings.autoRefreshEnabled;
+  elements.autoRefreshInput.disabled = !currentSettings.autoRefreshEnabled;
+  elements.autoRefreshInput.min = "1";
+  elements.autoRefreshInput.max = String(MAX_AUTO_REFRESH_MINUTES);
+  elements.autoRefreshInput.value = currentSettings.autoRefreshMinutes;
   elements.themeSelect.value = currentSettings.theme;
   applyAccent(currentSettings.accentColor);
   elements.chartDaysInput.min = String(MIN_CHART_DAYS);
@@ -861,7 +1171,7 @@ function renderSettings() {
   for (const button of elements.periodButtons) {
     button.classList.toggle("active", Number(button.dataset.days) === Number(currentSettings.chartDays));
   }
-  elements.settingsStatus.textContent = t("settingsSaved");
+  renderSettingsStatus();
   applyTheme(currentSettings.theme);
   applyLanguage();
   setLoading(currentLoading);
@@ -910,6 +1220,7 @@ function renderRateLimits(rateLimits) {
     empty.textContent = t("emptyRateLimits");
     elements.rateLimitList.append(empty);
     elements.rateLimitUpdated.textContent = "-";
+    syncRateLimitCountdownTimer();
     return;
   }
 
@@ -930,13 +1241,21 @@ function renderRateLimits(rateLimits) {
     const reset = document.createElement("span");
     reset.textContent = formatResetTime(limit);
 
+    const countdown = document.createElement("span");
+    countdown.className = "limit-countdown";
+    countdown.dataset.resetCountdown = limit.resetsAt || "";
+    countdown.textContent = formatUpdateCountdown(limit.resetsAt);
+
     const meter = document.createElement("div");
     meter.className = "limit-meter";
     meter.style.setProperty("--remaining", `${Math.max(0, Math.min(100, Number(limit.remainingPercent) || 0))}%`);
 
-    row.append(label, remaining, reset, meter);
+    row.append(label, remaining, reset, countdown, meter);
     elements.rateLimitList.append(row);
   }
+
+  updateRateLimitCountdowns();
+  syncRateLimitCountdownTimer();
 }
 
 function renderDailyChart(days) {
@@ -980,11 +1299,16 @@ function renderDailyChart(days) {
 }
 
 function showChartTooltip(event, day) {
-  elements.chartTooltip.innerHTML = `
-    <strong>${day.date}</strong>
-    <span>${formatCompact(day.tokens)} ${t("tokens")}</span>
-    <span>${formatCurrency(day.cost)}</span>
-  `;
+  const date = document.createElement("strong");
+  date.textContent = day.date;
+
+  const tokens = document.createElement("span");
+  tokens.textContent = `${formatCompact(day.tokens)} ${t("tokens")}`;
+
+  const cost = document.createElement("span");
+  cost.textContent = formatCurrency(day.cost);
+
+  elements.chartTooltip.replaceChildren(date, tokens, cost);
   elements.chartTooltip.hidden = false;
   moveChartTooltip(event);
 }
@@ -1041,24 +1365,37 @@ function renderStats(stats) {
   renderError(stats.error);
 
   elements.overviewProvider.textContent = provider.label;
-  elements.periodCostLabel.textContent = t("periodCost", { days: chartDays });
+  elements.overviewProviderLogo.src = provider.icon;
+  elements.overviewAccountName.textContent = stats.account?.displayName || provider.label;
+  elements.overviewAccountPlan.textContent = stats.account?.planLabel || provider.label;
+  applyProviderEstimateText(currentSettings.activeProvider);
   elements.periodTokensLabel.textContent = t("periodTokens", { days: chartDays });
+  elements.periodUsagePercent.dataset.periodLabel = t("periodAccumulated", { days: chartDays });
   elements.activityTitle.textContent = t("activityTrend", { days: chartDays });
   elements.overviewPeriod.textContent = t("daysPeriod", { days: chartDays });
-  elements.todayCost.textContent = formatCurrency(stats.featured.todayCost);
-  elements.periodCost.textContent = formatCurrency(stats.featured.periodCost);
+  renderCostMetricLabels(chartDays, stats);
+  renderCostMetricValues(stats);
+  elements.periodTokensContext.textContent = t("periodTokenContext", {
+    total: formatCompact(stats.totals.totalTokens),
+    latest: formatCompact(stats.featured.latestTokenUsage)
+  });
   elements.periodUsagePercent.textContent = Number.isFinite(stats.featured.periodUsagePercent)
     ? t("percentUsage", {
         percent: Math.round(stats.featured.periodUsagePercent),
         plan: stats.account?.planLabel || ""
       })
     : t("usageEstimated");
+  elements.periodTokens.closest(".hero-metric")?.style.setProperty(
+    "--usage-progress",
+    `${Number.isFinite(stats.featured.periodUsagePercent) ? Math.min(100, Math.max(0, stats.featured.periodUsagePercent)) : 0}%`
+  );
   elements.sidebarRemainingUsage.textContent = mainLimit ? formatPercent(mainLimit.remainingPercent) : "-";
   elements.sidebarPeriodMeta.textContent = mainLimit
     ? formatLimitMeta(mainLimit)
     : t("waitingForLogs", { provider: provider.label });
   elements.periodTokens.textContent = formatCompact(stats.featured.periodTokens);
   elements.latestTokenUsage.textContent = formatCompact(stats.featured.latestTokenUsage);
+  updateLatestTokenUsageMeter(statsRatioPercent(stats.featured.latestTokenUsage, stats.featured.periodTokens));
 
   elements.threadsTotal.textContent = formatCompact(stats.totals.threads);
   elements.threadsActive.textContent = formatCompact(stats.totals.activeThreads);
@@ -1157,10 +1494,20 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
       normalizeChartDays(currentSettings.chartDays)
     );
   }
+  if (Object.prototype.hasOwnProperty.call(normalizedNextSettings, "autoRefreshMinutes")) {
+    normalizedNextSettings.autoRefreshMinutes = normalizeAutoRefreshMinutes(
+      normalizedNextSettings.autoRefreshMinutes,
+      normalizeAutoRefreshMinutes(currentSettings.autoRefreshMinutes)
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedNextSettings, "autoRefreshEnabled")) {
+    normalizedNextSettings.autoRefreshEnabled = Boolean(normalizedNextSettings.autoRefreshEnabled);
+  }
   currentSettings = await aiUsage.updateSettings({
     ...currentSettings,
     ...normalizedNextSettings
   });
+  settingsSavedAt = new Date();
   renderSettings();
   if (languageChanged && lastStats) {
     renderStats(lastStats);
@@ -1168,6 +1515,7 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
   if (shouldRefresh) {
     await refreshStats({ preferCache: true });
   }
+  resetAutoRefreshTimer();
 }
 
 async function chooseHome(providerId) {
@@ -1179,6 +1527,7 @@ async function chooseHome(providerId) {
       renderSettings();
       cacheStats(providerId, result.stats);
       renderStats(result.stats);
+      resetAutoRefreshTimer();
     }
   } catch (error) {
     const provider = PROVIDERS[providerId] || PROVIDERS.codex;
@@ -1208,9 +1557,29 @@ function openProjectLink(event, url) {
   });
 }
 
+async function focusProviderByDirection(currentProvider, direction) {
+  const visibleButtons = elements.providerButtons.filter((button) => !button.hidden && isProviderEnabled(button.dataset.provider));
+  if (!visibleButtons.length) return;
+
+  const currentIndex = Math.max(
+    0,
+    visibleButtons.findIndex((button) => button.dataset.provider === currentProvider)
+  );
+  const nextIndex = (currentIndex + direction + visibleButtons.length) % visibleButtons.length;
+  const nextButton = visibleButtons[nextIndex];
+  nextButton.focus();
+  if (nextButton.dataset.provider !== currentSettings.activeProvider) {
+    await saveSettings({ activeProvider: nextButton.dataset.provider });
+  }
+}
+
 document.addEventListener("pointerdown", startWindowDrag, true);
 elements.updateButton.addEventListener("click", installAvailableUpdate);
-elements.refreshButton.addEventListener("click", () => refreshStats({ force: true }));
+elements.refreshButton.addEventListener("click", async () => {
+  stopAutoRefreshTimer();
+  await refreshStats({ force: true });
+  resetAutoRefreshTimer();
+});
 elements.settingsButton.addEventListener("click", () => setView("settings"));
 elements.homeButton.addEventListener("click", () => setView("home"));
 elements.settingsBackButton.addEventListener("click", () => setView("home"));
@@ -1225,6 +1594,18 @@ for (const button of elements.providerButtons) {
   button.addEventListener("click", async () => {
     if (!isProviderEnabled(button.dataset.provider)) return;
     await saveSettings({ activeProvider: button.dataset.provider });
+  });
+  button.addEventListener("keydown", async (event) => {
+    const directionByKey = {
+      ArrowDown: 1,
+      ArrowRight: 1,
+      ArrowUp: -1,
+      ArrowLeft: -1
+    };
+    const direction = directionByKey[event.key];
+    if (!direction) return;
+    event.preventDefault();
+    await focusProviderByDirection(button.dataset.provider, direction);
   });
 }
 for (const input of elements.enabledProviderInputs) {
@@ -1265,6 +1646,17 @@ elements.themeSelect.addEventListener("change", async () => {
 elements.languageSelect.addEventListener("change", async () => {
   await saveSettings({ language: elements.languageSelect.value }, false);
 });
+elements.autoRefreshEnabledInput.addEventListener("change", async () => {
+  await saveSettings({ autoRefreshEnabled: elements.autoRefreshEnabledInput.checked }, false);
+});
+elements.autoRefreshInput.addEventListener("change", async () => {
+  const autoRefreshMinutes = normalizeAutoRefreshMinutes(
+    elements.autoRefreshInput.value,
+    normalizeAutoRefreshMinutes(currentSettings.autoRefreshMinutes)
+  );
+  elements.autoRefreshInput.value = autoRefreshMinutes;
+  await saveSettings({ autoRefreshMinutes }, false);
+});
 for (const button of elements.accentButtons) {
   button.addEventListener("click", async () => {
     await saveSettings({ accentColor: button.dataset.accent }, false);
@@ -1294,6 +1686,7 @@ window.addEventListener("languagechange", () => {
 async function boot() {
   currentSettings = await aiUsage.getSettings();
   renderSettings();
+  resetAutoRefreshTimer();
   setView(currentView);
   await Promise.all([refreshStats({ preferCache: true }), checkForUpdates()]);
 }
