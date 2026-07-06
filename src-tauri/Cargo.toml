@@ -14,12 +14,12 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 chrono = "0.4"
 dirs = "6"
-rfd = "0.15"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rfd = "0.17"
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
-time = "=0.3.36"
+time = "=0.3.53"
 walkdir = "2"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
