@@ -17,6 +17,7 @@ AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding u
   - Reads local Claude Code session logs from `CLAUDE_CONFIG_DIR` or `CLAUDE_HOME` when set.
   - Defaults to `~/.claude`.
   - Aggregates assistant message usage from Claude Code JSONL logs.
+  - Reads local Claude account identity and rate-limit tier metadata when available.
 - GitHub Copilot
   - Reads local VS Code Copilot extension storage from `GITHUB_COPILOT_HOME` or `COPILOT_HOME` when set.
   - Defaults to VS Code/Copilot global storage, such as `~/Library/Application Support/Code/User/globalStorage/github.copilot-chat` on macOS.
@@ -30,13 +31,22 @@ AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding u
   - Defaults to common ChatGPT desktop app storage, such as `~/Library/Application Support/com.openai.chat` on macOS.
   - Can also read ChatGPT export folders that include `conversations.json`.
   - Aggregates recognized local/exported conversation fields and falls back to text-length token estimates when explicit token usage is unavailable.
+  - Shows local activity-based usage-window estimates when official quota data is unavailable.
+
+## Accuracy Notes
+
+- AI Usage only reads local files. It does not call provider billing APIs or upload usage data.
+- Codex cost uses a local `$1 / 1M tokens` estimate and is not an official invoice.
+- Claude Code, GitHub Copilot, Cursor, and ChatGPT token/activity numbers are local estimates. The app shows token usage for these providers instead of dollar costs unless a reliable price model is available.
+- Remaining-usage cards for Claude Code and ChatGPT are inferred from local activity windows and may differ from official provider limits.
 
 ## Current Scope
 
 - Supports Windows and Linux release packages through Tauri. macOS can be built locally, but no macOS release package is published yet.
 - Uses a local desktop dashboard with a sidebar provider switch.
-- Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, ChatGPT directory, theme, accent color, and chart period.
+- Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, ChatGPT directory, theme, accent color, chart period, enabled providers, and auto-refresh interval.
 - Defaults to a 30-day chart period.
+- Auto refresh can be disabled or configured in minutes. Manual refresh resets the auto-refresh countdown.
 - No tray integration yet.
 
 ## Development
@@ -50,6 +60,13 @@ Run tests:
 
 ```sh
 npm test
+```
+
+Run formatting and lint checks:
+
+```sh
+npm run fmt:check
+npm run lint
 ```
 
 ## Feedback
@@ -130,14 +147,14 @@ Outputs:
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.3_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.3_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.4_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.4_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.3_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.4_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.
@@ -168,7 +185,13 @@ $env:TAURI_SIGNING_PRIVATE_KEY="C:\Users\you\.tauri\ai-usage.key"
 npm run package:win
 ```
 
-The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Publish a `latest.json` release asset containing Windows and Linux platform entries only, with each `signature` value copied from the generated `.sig` file.
+The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Tagged GitHub Actions releases generate and upload this updater manifest automatically when updater signing secrets are configured.
+
+For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
+
+```sh
+npm run updater:latest -- --artifacts release-artifacts --output release-artifacts/latest.json --repo peipeitu/ai-usage --tag v0.1.4
+```
 
 Linux AppImage GPG signing is optional and separate from the updater signature:
 

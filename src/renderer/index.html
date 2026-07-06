@@ -28,31 +28,31 @@
         <section id="sidebarProviderSection" class="sidebar-provider" aria-label="AI 服务">
           <span id="sidebarProviderLabel">AI 服务</span>
           <div id="providerOptions" class="provider-options compact" role="radiogroup" aria-label="AI 服务">
-            <button class="provider-option active" type="button" data-provider="codex" aria-checked="true">
+            <button class="provider-option active" type="button" role="radio" data-provider="codex" aria-checked="true">
               <span class="provider-option-logo" aria-hidden="true">
                 <img src="./assets/provider-codex.svg" alt="" />
               </span>
               <span>Codex</span>
             </button>
-            <button class="provider-option" type="button" data-provider="claude" aria-checked="false">
+            <button class="provider-option" type="button" role="radio" data-provider="claude" aria-checked="false">
               <span class="provider-option-logo" aria-hidden="true">
                 <img src="./assets/provider-claude.svg" alt="" />
               </span>
               <span>Claude Code</span>
             </button>
-            <button class="provider-option" type="button" data-provider="copilot" aria-checked="false">
+            <button class="provider-option" type="button" role="radio" data-provider="copilot" aria-checked="false">
               <span class="provider-option-logo" aria-hidden="true">
                 <img src="./assets/provider-copilot.svg" alt="" />
               </span>
               <span>GitHub Copilot</span>
             </button>
-            <button class="provider-option" type="button" data-provider="cursor" aria-checked="false">
+            <button class="provider-option" type="button" role="radio" data-provider="cursor" aria-checked="false">
               <span class="provider-option-logo" aria-hidden="true">
                 <img src="./assets/provider-cursor.svg" alt="" />
               </span>
               <span>Cursor</span>
             </button>
-            <button class="provider-option" type="button" data-provider="chatgpt" aria-checked="false">
+            <button class="provider-option" type="button" role="radio" data-provider="chatgpt" aria-checked="false">
               <span class="provider-option-logo" aria-hidden="true">
                 <img src="./assets/provider-chatgpt.svg" alt="" />
               </span>
@@ -86,6 +86,7 @@
           </div>
           <div class="topbar-actions">
             <button id="updateButton" class="update-button" type="button" hidden>更新</button>
+            <span id="autoRefreshCountdown" class="refresh-countdown" hidden>-</span>
             <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
               <span aria-hidden="true">↻</span>
             </button>
@@ -95,31 +96,59 @@
         <section id="errorPanel" class="error-panel" hidden></section>
 
         <section id="homeView">
-          <div class="overview-meta">
-            <span id="overviewSourceLabel">数据源</span>
-            <strong id="overviewProvider">Codex</strong>
-            <span id="overviewPeriod">近 30 天</span>
-            <span id="overviewEstimateLabel">本地日志估算</span>
-          </div>
+          <section class="usage-console" aria-label="Featured usage summary">
+            <div class="overview-status">
+              <div class="overview-service">
+                <span class="overview-service-logo" aria-hidden="true">
+                  <img id="overviewProviderLogo" src="./assets/provider-codex.svg" alt="" />
+                </span>
+                <div>
+                  <span id="overviewSourceLabel">数据源</span>
+                  <strong id="overviewProvider">Codex</strong>
+                </div>
+              </div>
 
-          <section class="hero-metrics" aria-label="Featured usage summary">
-            <article class="hero-metric">
-              <span id="todayCostLabel">今日费用</span>
-              <strong id="todayCost">-</strong>
-            </article>
-            <article class="hero-metric">
-              <span id="periodCostLabel">近 30 天费用</span>
-              <strong id="periodCost">-</strong>
-              <small id="periodUsagePercent">-</small>
-            </article>
-            <article class="hero-metric">
-              <span id="periodTokensLabel">近 30 天 token 用量</span>
-              <strong id="periodTokens">-</strong>
-            </article>
-            <article class="hero-metric">
-              <span id="latestTokenUsageLabel">最近 token 用量</span>
-              <strong id="latestTokenUsage">-</strong>
-            </article>
+              <div class="overview-meta">
+                <span id="overviewPeriod">近 30 天</span>
+                <span id="overviewEstimateLabel" class="estimate-badge">本地日志估算</span>
+              </div>
+
+              <div class="overview-account">
+                <span id="overviewAccountName">Codex</span>
+                <strong id="overviewAccountPlan">Codex</strong>
+              </div>
+            </div>
+
+            <section class="hero-metrics">
+              <article class="hero-metric primary">
+                <span id="periodTokensLabel">近 30 天 token 用量</span>
+                <strong id="periodTokens">-</strong>
+                <p id="periodTokensContext" class="hero-context">-</p>
+                <div class="hero-meter" aria-hidden="true"></div>
+                <small id="periodUsagePercent">-</small>
+              </article>
+              <article class="hero-metric">
+                <span id="todayCostLabel">今日费用</span>
+                <strong id="todayCost">-</strong>
+              </article>
+              <article class="hero-metric">
+                <span id="periodCostLabel">近 30 天费用</span>
+                <strong id="periodCost">-</strong>
+              </article>
+              <article class="hero-metric compact">
+                <span id="latestTokenUsageLabel">最近 token 用量</span>
+                <strong id="latestTokenUsage">-</strong>
+                <div
+                  id="latestTokenUsageMeter"
+                  class="hero-meter subtle"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="0"
+                  aria-label="最近 token 占当前周期 token 的比例"
+                ></div>
+              </article>
+            </section>
           </section>
 
           <section class="summary-grid" aria-label="Usage summary">
@@ -215,7 +244,7 @@
                   <span id="settingsChartNavLabel">图表</span>
                 </button>
 
-                <span id="settingsProvidersLabel" class="settings-nav-heading">Providers</span>
+                <span id="settingsProvidersLabel" class="settings-nav-heading">AI 服务</span>
                 <button class="settings-nav-item" type="button" data-settings-section="settingsCodexProviderSection" data-settings-provider="codex">
                   <span class="settings-nav-icon provider-logo" aria-hidden="true">
                     <img src="./assets/provider-codex.svg" alt="" />
@@ -300,6 +329,20 @@
                         <option id="languageEnOption" value="en">English</option>
                       </select>
                     </label>
+
+                    <label class="setting-row">
+                      <span id="autoRefreshLabel">自动更新</span>
+                      <div class="auto-refresh-control">
+                        <label class="toggle-item auto-refresh-toggle">
+                          <input id="autoRefreshEnabledInput" type="checkbox" />
+                          <span id="autoRefreshEnabledLabel">启用</span>
+                        </label>
+                        <label class="days-input">
+                          <input id="autoRefreshInput" type="number" min="1" max="1440" step="1" />
+                          <span id="autoRefreshSuffix">分钟</span>
+                        </label>
+                      </div>
+                    </label>
                   </div>
                 </section>
 
@@ -354,7 +397,7 @@
                   </div>
                 </section>
 
-                <div class="settings-group-title settings-primary-heading" id="settingsProvidersContentTitle">Providers</div>
+                <div class="settings-group-title settings-primary-heading" id="settingsProvidersContentTitle">AI 服务</div>
 
                 <section id="settingsCodexProviderSection" class="settings-section">
                   <div class="settings-section-heading">

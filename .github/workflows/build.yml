@@ -2,8 +2,14 @@ name: Build
 
 on:
   push:
+    branches:
+      - main
+      - "codex/**"
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       platform:
@@ -22,7 +28,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows:
@@ -38,6 +44,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -51,8 +59,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
       - name: Package signed
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.package) && env.HAS_UPDATER_SIGNING == 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING == 'true' }}
         run: npm run package:win
         env:
           AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
@@ -60,11 +74,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.package) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:win:unsigned
 
       - name: Upload artifact
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.package }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package) }}
         uses: actions/upload-artifact@v6
         with:
           name: ai-usage-windows
@@ -73,19 +87,6 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.sig
           if-no-files-found: error
           retention-days: 7
-
-      - name: Upload release asset
-        if: ${{ startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.package) }}
-        shell: bash
-        run: |
-          gh release view "${{ github.ref_name }}" \
-            || gh release create "${{ github.ref_name }}" --title "AI Usage ${{ github.ref_name }}" --generate-notes \
-            || gh release view "${{ github.ref_name }}"
-          shopt -s nullglob
-          assets=("src-tauri/target/release/bundle/nsis/"*.exe "src-tauri/target/release/bundle/nsis/"*.sig)
-          gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber
-        env:
-          GH_TOKEN: ${{ github.token }}
 
   linux:
     name: Linux
@@ -100,6 +101,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -122,8 +125,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Format check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
       - name: Package signed
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.package) && env.HAS_UPDATER_SIGNING == 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING == 'true' }}
         run: npm run package:linux
         env:
           AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
@@ -131,11 +140,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.package) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:linux:unsigned
 
       - name: Upload artifact
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.package }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package) }}
         uses: actions/upload-artifact@v6
         with:
           name: ai-usage-linux
@@ -146,18 +155,47 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  release:
+    name: Release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs:
+      - windows
+      - linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      HAS_UPDATER_SIGNING: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: release-artifacts
+
+      - name: Generate updater manifest
+        if: ${{ env.HAS_UPDATER_SIGNING == 'true' }}
+        run: node scripts/write-latest-json.js --artifacts release-artifacts --output release-artifacts/latest.json --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
+
       - name: Upload release assets
-        if: ${{ startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.package) }}
+        shell: bash
         run: |
           gh release view "${{ github.ref_name }}" \
             || gh release create "${{ github.ref_name }}" --title "AI Usage ${{ github.ref_name }}" --generate-notes \
             || gh release view "${{ github.ref_name }}"
-          shopt -s nullglob
-          assets=(
-            "src-tauri/target/release/bundle/appimage/"*.AppImage
-            "src-tauri/target/release/bundle/appimage/"*.sig
-            "src-tauri/target/release/bundle/deb/"*.deb
-          )
+          mapfile -t assets < <(find release-artifacts -type f \( -name '*.exe' -o -name '*.sig' -o -name '*.AppImage' -o -name '*.deb' -o -name 'latest.json' \))
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found."
+            exit 1
+          fi
           gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
