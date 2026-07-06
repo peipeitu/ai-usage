@@ -244,6 +244,11 @@
                   <span id="settingsChartNavLabel">图表</span>
                 </button>
 
+                <button class="settings-nav-item" type="button" data-settings-section="settingsUpdateSection">
+                  <span aria-hidden="true">↻</span>
+                  <span id="settingsUpdateNavLabel">更新</span>
+                </button>
+
                 <span id="settingsProvidersLabel" class="settings-nav-heading">AI 服务</span>
                 <button class="settings-nav-item" type="button" data-settings-section="settingsCodexProviderSection" data-settings-provider="codex">
                   <span class="settings-nav-icon provider-logo" aria-hidden="true">
@@ -397,6 +402,27 @@
                   </div>
                 </section>
 
+                <section id="settingsUpdateSection" class="settings-section">
+                  <div class="settings-section-heading">
+                    <h3 id="settingsUpdateTitle">更新</h3>
+                  </div>
+                  <div class="settings-group">
+                    <div class="setting-row">
+                      <span id="currentVersionLabel">当前版本</span>
+                      <code id="currentVersionValue" class="setting-inline-value">-</code>
+                    </div>
+                    <div class="setting-row">
+                      <span id="latestVersionLabel">最新版本</span>
+                      <div class="setting-control update-setting-control">
+                        <code id="latestVersionValue" class="setting-inline-value">-</code>
+                        <span id="settingsUpdateStatus" class="setting-status-text">-</span>
+                        <button id="checkUpdateButton" class="secondary-button" type="button">检查更新</button>
+                        <button id="settingsInstallUpdateButton" type="button" hidden>立即更新</button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
                 <div class="settings-group-title settings-primary-heading" id="settingsProvidersContentTitle">AI 服务</div>
 
                 <section id="settingsCodexProviderSection" class="settings-section">
@@ -514,6 +540,49 @@
         </section>
       </section>
     </main>
+
+    <div id="updateDialog" class="modal-backdrop" hidden>
+      <section
+        class="update-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="updateDialogTitle"
+        aria-describedby="updateDialogSubtitle"
+      >
+        <header class="update-dialog-header">
+          <div>
+            <span id="updateDialogEyebrow" class="eyebrow">可用更新</span>
+            <h2 id="updateDialogTitle">发现新版本</h2>
+            <p id="updateDialogSubtitle">安装后应用会自动重启。</p>
+          </div>
+          <button id="closeUpdateDialogButton" class="icon-button" type="button" aria-label="关闭" title="关闭">
+            <span aria-hidden="true">×</span>
+          </button>
+        </header>
+        <dl class="update-version-grid">
+          <div>
+            <dt id="dialogCurrentVersionLabel">当前版本</dt>
+            <dd id="dialogCurrentVersion">-</dd>
+          </div>
+          <div>
+            <dt id="dialogLatestVersionLabel">最新版本</dt>
+            <dd id="dialogLatestVersion">-</dd>
+          </div>
+          <div>
+            <dt id="dialogPublishedAtLabel">发布时间</dt>
+            <dd id="dialogPublishedAt">-</dd>
+          </div>
+        </dl>
+        <section class="update-notes-section">
+          <h3 id="updateNotesTitle">更新说明</h3>
+          <pre id="updateNotes">-</pre>
+        </section>
+        <footer class="update-dialog-actions">
+          <button id="postponeUpdateButton" class="secondary-button" type="button">稍后</button>
+          <button id="installUpdateButton" type="button">立即更新</button>
+        </footer>
+      </section>
+    </div>
 
     <script src="./renderer.js"></script>
   </body>
