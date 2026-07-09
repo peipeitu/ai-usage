@@ -451,14 +451,22 @@ fn current_app_version() -> String {
 
 #[cfg(any(windows, target_os = "linux"))]
 fn updater_public_key() -> Option<&'static str> {
-    option_env!("AI_USAGE_UPDATER_PUBLIC_KEY").and_then(|key| {
-        let key = key.trim();
-        if key.is_empty() {
-            None
-        } else {
-            Some(key)
-        }
-    })
+    #[cfg(debug_assertions)]
+    {
+        None
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        option_env!("AI_USAGE_UPDATER_PUBLIC_KEY").and_then(|key| {
+            let key = key.trim();
+            if key.is_empty() {
+                None
+            } else {
+                Some(key)
+            }
+        })
+    }
 }
 
 fn unsupported_update_info() -> UpdateInfo {

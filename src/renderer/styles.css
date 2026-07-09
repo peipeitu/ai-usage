@@ -1596,6 +1596,30 @@ body[data-platform="darwin"] .settings-rail {
   min-width: 0;
 }
 
+.setting-inline-value {
+  justify-self: start;
+  overflow: hidden;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-setting-control {
+  flex-wrap: wrap;
+}
+
+.setting-status-text {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .folder-control code {
   flex: 1;
   min-width: 0;
@@ -1950,4 +1974,115 @@ body[data-platform="darwin"] .settings-rail {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(20, 24, 28, 0.38);
+  backdrop-filter: blur(12px);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.update-dialog {
+  display: grid;
+  gap: 18px;
+  width: min(560px, 100%);
+  max-height: min(720px, calc(100vh - 56px));
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 8px;
+  padding: 22px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 28px 90px rgba(16, 20, 24, 0.28);
+}
+
+.update-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.update-dialog-header h2 {
+  margin-top: 3px;
+  font-size: 22px;
+  font-weight: 560;
+}
+
+.update-dialog-header p {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.update-version-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.update-version-grid > div {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+  border-radius: 8px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--panel-tint));
+}
+
+.update-version-grid dt {
+  margin-bottom: 6px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.update-version-grid dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 540;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-notes-section {
+  display: grid;
+  gap: 9px;
+}
+
+.update-notes-section h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.update-notes-section pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, transparent);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--panel) 78%, var(--panel-tint));
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  white-space: pre-wrap;
+}
+
+.update-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }

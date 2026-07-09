@@ -64,8 +64,10 @@ let activeSettingsSectionId = "settingsGeneralSection";
 let lastStats = null;
 let latestStatsRequestId = 0;
 let currentLoading = false;
-let updateInfo = { supported: false, available: false, version: null };
+let updateInfo = { supported: false, available: false, currentVersion: null, version: null };
 let updateInstalling = false;
+let updateCheckInProgress = false;
+let updateCheckError = "";
 let rateLimitCountdownTimer = null;
 let settingsSavedAt = new Date();
 let autoRefreshTimer = null;
@@ -201,6 +203,24 @@ const I18N = {
     updateAvailable: "更新到 {version}",
     installingUpdate: "正在更新",
     installUpdateError: "无法安装更新",
+    updates: "更新",
+    checkForUpdates: "检查更新",
+    checkingUpdate: "正在检查",
+    noUpdateAvailable: "已是最新版本",
+    updateUnsupported: "当前构建未启用自动更新",
+    updateCheckFailed: "无法检查更新",
+    updateAvailableStatus: "发现新版本 {version}",
+    currentVersion: "当前版本",
+    latestVersion: "最新版本",
+    publishedAt: "发布时间",
+    updateDialogEyebrow: "可用更新",
+    updateDialogTitle: "发现新版本",
+    updateDialogSubtitle: "安装完成后应用会自动重启。",
+    releaseNotes: "更新说明",
+    noReleaseNotes: "暂无更新说明。",
+    installNow: "立即更新",
+    later: "稍后",
+    close: "关闭",
     enabledProviders: "启用 AI 服务",
     atLeastOneProvider: "至少启用一个 AI 服务",
     autoRefresh: "自动更新",
@@ -289,6 +309,24 @@ const I18N = {
     updateAvailable: "Update to {version}",
     installingUpdate: "Updating",
     installUpdateError: "Unable to install update",
+    updates: "Updates",
+    checkForUpdates: "Check for updates",
+    checkingUpdate: "Checking",
+    noUpdateAvailable: "You are up to date",
+    updateUnsupported: "Automatic updates are not enabled in this build",
+    updateCheckFailed: "Unable to check for updates",
+    updateAvailableStatus: "Version {version} is available",
+    currentVersion: "Current version",
+    latestVersion: "Latest version",
+    publishedAt: "Published",
+    updateDialogEyebrow: "Update available",
+    updateDialogTitle: "A new version is available",
+    updateDialogSubtitle: "The app will restart after installation.",
+    releaseNotes: "Release notes",
+    noReleaseNotes: "No release notes available.",
+    installNow: "Update now",
+    later: "Later",
+    close: "Close",
     enabledProviders: "Enabled AI services",
     atLeastOneProvider: "Keep at least one AI service enabled",
     autoRefresh: "Auto refresh",
@@ -346,6 +384,7 @@ const elements = {
   settingsGeneralNavLabel: document.getElementById("settingsGeneralNavLabel"),
   settingsAppearanceNavLabel: document.getElementById("settingsAppearanceNavLabel"),
   settingsChartNavLabel: document.getElementById("settingsChartNavLabel"),
+  settingsUpdateNavLabel: document.getElementById("settingsUpdateNavLabel"),
   settingsCodexNavLabel: document.getElementById("settingsCodexNavLabel"),
   settingsClaudeNavLabel: document.getElementById("settingsClaudeNavLabel"),
   settingsCopilotNavLabel: document.getElementById("settingsCopilotNavLabel"),
@@ -430,6 +469,7 @@ const elements = {
   settingsChatgptProviderTitle: document.getElementById("settingsChatgptProviderTitle"),
   settingsAppearanceTitle: document.getElementById("settingsAppearanceTitle"),
   settingsChartTitle: document.getElementById("settingsChartTitle"),
+  settingsUpdateTitle: document.getElementById("settingsUpdateTitle"),
   providerEnabledLabels: Array.from(document.querySelectorAll("[data-provider-enabled-label]")),
   providerToggleLabels: Array.from(document.querySelectorAll("[data-provider-toggle-label]")),
   codexHomeLabel: document.getElementById("codexHomeLabel"),
@@ -459,6 +499,28 @@ const elements = {
   period30Button: document.getElementById("period30Button"),
   period90Button: document.getElementById("period90Button"),
   daysSuffix: document.getElementById("daysSuffix"),
+  currentVersionLabel: document.getElementById("currentVersionLabel"),
+  currentVersionValue: document.getElementById("currentVersionValue"),
+  latestVersionLabel: document.getElementById("latestVersionLabel"),
+  latestVersionValue: document.getElementById("latestVersionValue"),
+  settingsUpdateStatus: document.getElementById("settingsUpdateStatus"),
+  checkUpdateButton: document.getElementById("checkUpdateButton"),
+  settingsInstallUpdateButton: document.getElementById("settingsInstallUpdateButton"),
+  updateDialog: document.getElementById("updateDialog"),
+  updateDialogEyebrow: document.getElementById("updateDialogEyebrow"),
+  updateDialogTitle: document.getElementById("updateDialogTitle"),
+  updateDialogSubtitle: document.getElementById("updateDialogSubtitle"),
+  closeUpdateDialogButton: document.getElementById("closeUpdateDialogButton"),
+  dialogCurrentVersionLabel: document.getElementById("dialogCurrentVersionLabel"),
+  dialogCurrentVersion: document.getElementById("dialogCurrentVersion"),
+  dialogLatestVersionLabel: document.getElementById("dialogLatestVersionLabel"),
+  dialogLatestVersion: document.getElementById("dialogLatestVersion"),
+  dialogPublishedAtLabel: document.getElementById("dialogPublishedAtLabel"),
+  dialogPublishedAt: document.getElementById("dialogPublishedAt"),
+  updateNotesTitle: document.getElementById("updateNotesTitle"),
+  updateNotes: document.getElementById("updateNotes"),
+  postponeUpdateButton: document.getElementById("postponeUpdateButton"),
+  installUpdateButton: document.getElementById("installUpdateButton"),
   providerButtons: Array.from(document.querySelectorAll(".sidebar-provider [data-provider]")),
   settingsProviderNavButtons: Array.from(document.querySelectorAll("[data-settings-provider]")),
   enabledProviderInputs: Array.from(document.querySelectorAll("[data-enabled-provider]")),
@@ -816,6 +878,7 @@ function applyLanguage() {
   elements.settingsGeneralNavLabel.textContent = t("general");
   elements.settingsAppearanceNavLabel.textContent = t("appearance");
   elements.settingsChartNavLabel.textContent = t("chart");
+  elements.settingsUpdateNavLabel.textContent = t("updates");
   elements.settingsCodexNavLabel.textContent = PROVIDERS.codex.label;
   elements.settingsClaudeNavLabel.textContent = PROVIDERS.claude.label;
   elements.settingsCopilotNavLabel.textContent = PROVIDERS.copilot.label;
@@ -870,6 +933,7 @@ function applyLanguage() {
   elements.settingsChatgptProviderTitle.textContent = PROVIDERS.chatgpt.label;
   elements.settingsAppearanceTitle.textContent = t("appearance");
   elements.settingsChartTitle.textContent = t("chart");
+  elements.settingsUpdateTitle.textContent = t("updates");
   for (const label of elements.providerEnabledLabels) {
     label.textContent = t("providerEnabled");
   }
@@ -905,8 +969,23 @@ function applyLanguage() {
   elements.period30Button.textContent = t("oneMonth");
   elements.period90Button.textContent = t("threeMonths");
   elements.daysSuffix.textContent = t("daysSuffix");
+  elements.currentVersionLabel.textContent = t("currentVersion");
+  elements.latestVersionLabel.textContent = t("latestVersion");
+  elements.checkUpdateButton.textContent = updateCheckInProgress ? t("checkingUpdate") : t("checkForUpdates");
+  elements.settingsInstallUpdateButton.textContent = updateInstalling ? t("installingUpdate") : t("installNow");
+  elements.updateDialogEyebrow.textContent = t("updateDialogEyebrow");
+  elements.updateDialogTitle.textContent = t("updateDialogTitle");
+  elements.updateDialogSubtitle.textContent = t("updateDialogSubtitle");
+  elements.closeUpdateDialogButton.setAttribute("aria-label", t("close"));
+  elements.closeUpdateDialogButton.setAttribute("title", t("close"));
+  elements.dialogCurrentVersionLabel.textContent = t("currentVersion");
+  elements.dialogLatestVersionLabel.textContent = t("latestVersion");
+  elements.dialogPublishedAtLabel.textContent = t("publishedAt");
+  elements.updateNotesTitle.textContent = t("releaseNotes");
+  elements.postponeUpdateButton.textContent = t("later");
+  elements.installUpdateButton.textContent = updateInstalling ? t("installingUpdate") : t("installNow");
   renderProviderVisibility();
-  renderUpdateButton();
+  renderUpdateSurfaces();
   activateSettingsNav(activeSettingsSectionId);
   setView(currentView);
 }
@@ -926,16 +1005,76 @@ function applyAccent(accentColor) {
   }
 }
 
+function updateStatusText() {
+  if (updateInstalling) {
+    return t("installingUpdate");
+  }
+  if (updateCheckInProgress) {
+    return t("checkingUpdate");
+  }
+  if (updateCheckError) {
+    return updateCheckError;
+  }
+  if (!updateInfo.supported) {
+    return t("updateUnsupported");
+  }
+  if (updateInfo.available) {
+    return t("updateAvailableStatus", { version: updateInfo.version || "" });
+  }
+  return t("noUpdateAvailable");
+}
+
+function renderUpdateDialog() {
+  const version = updateInfo.version || "-";
+  const currentVersion = updateInfo.currentVersion || "-";
+  elements.dialogCurrentVersion.textContent = currentVersion;
+  elements.dialogLatestVersion.textContent = version;
+  elements.dialogPublishedAt.textContent = updateInfo.publishedAt ? formatDate(updateInfo.publishedAt) : "-";
+  elements.updateNotes.textContent = updateInfo.notes?.trim() || t("noReleaseNotes");
+  elements.installUpdateButton.disabled = updateInstalling;
+  elements.installUpdateButton.textContent = updateInstalling ? t("installingUpdate") : t("installNow");
+}
+
+function openUpdateDialog() {
+  if (!updateInfo.supported || !updateInfo.available) {
+    return;
+  }
+  renderUpdateDialog();
+  elements.updateDialog.hidden = false;
+  elements.installUpdateButton.focus();
+}
+
+function closeUpdateDialog() {
+  elements.updateDialog.hidden = true;
+}
+
 function renderUpdateButton() {
   const version = updateInfo.version || "";
   const isSettings = currentView === "settings";
   const shouldShow = Boolean(updateInfo.supported && updateInfo.available && !isSettings);
 
   elements.updateButton.hidden = !shouldShow;
-  elements.updateButton.disabled = updateInstalling;
+  elements.updateButton.disabled = currentLoading || updateInstalling;
   elements.updateButton.textContent = updateInstalling ? t("installingUpdate") : t("updateAvailable", { version });
   elements.updateButton.setAttribute("aria-label", t("updateAvailable", { version }));
   elements.updateButton.setAttribute("title", t("updateAvailable", { version }));
+}
+
+function renderUpdateSurfaces() {
+  renderUpdateButton();
+  elements.currentVersionValue.textContent = updateInfo.currentVersion || "-";
+  elements.latestVersionValue.textContent = updateInfo.version || "-";
+  elements.settingsUpdateStatus.textContent = updateStatusText();
+  elements.checkUpdateButton.disabled = currentLoading || updateCheckInProgress || updateInstalling;
+  elements.checkUpdateButton.textContent = updateCheckInProgress ? t("checkingUpdate") : t("checkForUpdates");
+  elements.settingsInstallUpdateButton.hidden = !Boolean(updateInfo.supported && updateInfo.available);
+  elements.settingsInstallUpdateButton.disabled = currentLoading || updateInstalling;
+  elements.settingsInstallUpdateButton.textContent = updateInstalling
+    ? t("installingUpdate")
+    : t("updateAvailable", { version: updateInfo.version || "" });
+  if (!elements.updateDialog.hidden) {
+    renderUpdateDialog();
+  }
 }
 
 function setView(view) {
@@ -950,13 +1089,18 @@ function setView(view) {
   elements.settingsButton.classList.toggle("active", isSettings);
   elements.viewEyebrow.textContent = isSettings ? t("preferences") : `${provider.label} ${t("usage")}`;
   elements.viewTitle.textContent = isSettings ? t("settings") : t("overview");
-  renderUpdateButton();
+  renderUpdateSurfaces();
   renderAutoRefreshCountdown();
   syncRateLimitCountdownTimer();
 }
 
 function settingsPanelGroupTitle(sectionId) {
-  return ["settingsGeneralSection", "settingsAppearanceSection", "settingsChartSection"].includes(sectionId)
+  return [
+    "settingsGeneralSection",
+    "settingsAppearanceSection",
+    "settingsChartSection",
+    "settingsUpdateSection"
+  ].includes(sectionId)
     ? t("personal")
     : t("providers");
 }
@@ -989,6 +1133,9 @@ function setLoading(isLoading) {
   currentLoading = isLoading;
   elements.refreshButton.disabled = isLoading;
   elements.updateButton.disabled = isLoading || updateInstalling;
+  elements.checkUpdateButton.disabled = isLoading || updateCheckInProgress || updateInstalling;
+  elements.settingsInstallUpdateButton.disabled = isLoading || updateInstalling;
+  elements.installUpdateButton.disabled = updateInstalling;
   elements.chooseCodexHomeButton.disabled = isLoading || !isProviderEnabled("codex");
   elements.chooseClaudeHomeButton.disabled = isLoading || !isProviderEnabled("claude");
   elements.chooseCopilotHomeButton.disabled = isLoading || !isProviderEnabled("copilot");
@@ -1457,13 +1604,32 @@ async function refreshStats(options = {}) {
   }
 }
 
-async function checkForUpdates() {
+async function checkForUpdates(options = {}) {
+  if (updateCheckInProgress) {
+    return;
+  }
+
+  const { manual = false } = options;
+  updateCheckInProgress = true;
+  updateCheckError = "";
+  renderUpdateSurfaces();
+
   try {
     updateInfo = await aiUsage.checkUpdate();
-  } catch {
-    updateInfo = { supported: false, available: false, version: null };
+    if (manual && updateInfo.supported && updateInfo.available) {
+      openUpdateDialog();
+    }
+  } catch (error) {
+    if (manual) {
+      updateInfo = { ...updateInfo, available: false, version: null };
+      updateCheckError = error.message || t("updateCheckFailed");
+    } else {
+      updateInfo = { supported: false, available: false, currentVersion: null, version: null };
+    }
+  } finally {
+    updateCheckInProgress = false;
+    renderUpdateSurfaces();
   }
-  renderUpdateButton();
 }
 
 async function installAvailableUpdate() {
@@ -1472,7 +1638,7 @@ async function installAvailableUpdate() {
   }
 
   updateInstalling = true;
-  renderUpdateButton();
+  renderUpdateSurfaces();
   setLoading(currentLoading);
 
   try {
@@ -1480,7 +1646,7 @@ async function installAvailableUpdate() {
   } catch (error) {
     renderError(error.message || t("installUpdateError"));
     updateInstalling = false;
-    renderUpdateButton();
+    renderUpdateSurfaces();
     setLoading(currentLoading);
   }
 }
@@ -1574,7 +1740,17 @@ async function focusProviderByDirection(currentProvider, direction) {
 }
 
 document.addEventListener("pointerdown", startWindowDrag, true);
-elements.updateButton.addEventListener("click", installAvailableUpdate);
+elements.updateButton.addEventListener("click", openUpdateDialog);
+elements.checkUpdateButton.addEventListener("click", () => checkForUpdates({ manual: true }));
+elements.settingsInstallUpdateButton.addEventListener("click", openUpdateDialog);
+elements.closeUpdateDialogButton.addEventListener("click", closeUpdateDialog);
+elements.postponeUpdateButton.addEventListener("click", closeUpdateDialog);
+elements.installUpdateButton.addEventListener("click", installAvailableUpdate);
+elements.updateDialog.addEventListener("click", (event) => {
+  if (event.target === elements.updateDialog) {
+    closeUpdateDialog();
+  }
+});
 elements.refreshButton.addEventListener("click", async () => {
   stopAutoRefreshTimer();
   await refreshStats({ force: true });
@@ -1680,6 +1856,11 @@ window.addEventListener("languagechange", () => {
   renderSettings();
   if (lastStats) {
     renderStats(lastStats);
+  }
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.updateDialog.hidden) {
+    closeUpdateDialog();
   }
 });
 
