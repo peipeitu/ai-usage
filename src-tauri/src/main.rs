@@ -902,6 +902,12 @@ fn codex_paths(settings: &Settings) -> (PathBuf, PathBuf, Value) {
     (home, state_db, paths)
 }
 
+fn sqlite_nonnegative_u64(value: Option<i64>) -> u64 {
+    value
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0)
+}
+
 fn read_codex_threads(db_path: &Path) -> Result<Vec<Thread>, String> {
     let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| error.to_string())?;
@@ -933,7 +939,7 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<Thread>, String> {
                     .unwrap_or_else(|| "Unknown".to_string()),
                 cwd: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 archived: row.get::<_, Option<i64>>(6)?.unwrap_or(0) == 1,
-                tokens_used: row.get::<_, Option<u64>>(7)?.unwrap_or(0),
+                tokens_used: sqlite_nonnegative_u64(row.get::<_, Option<i64>>(7)?),
                 rollout_path: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                 created_at_ms: created,
                 updated_at_ms: updated,
@@ -4057,6 +4063,13 @@ mod tests {
         let normalized = normalize_settings(settings);
 
         assert_eq!(normalized.auto_refresh_minutes, 1);
+    }
+
+    #[test]
+    fn sqlite_nonnegative_u64_handles_null_and_negative_values() {
+        assert_eq!(sqlite_nonnegative_u64(None), 0);
+        assert_eq!(sqlite_nonnegative_u64(Some(-1)), 0);
+        assert_eq!(sqlite_nonnegative_u64(Some(42)), 42);
     }
 
     #[test]
