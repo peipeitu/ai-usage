@@ -192,6 +192,20 @@ struct Stats {
     paths: Value,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageHistory {
+    #[serde(default)]
+    codex: HashMap<String, DailyTokenHistory>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DailyTokenHistory {
+    #[serde(default)]
+    daily_tokens: HashMap<String, u64>,
+}
+
 #[derive(Clone, Debug)]
 struct Thread {
     id: String,
@@ -338,6 +352,10 @@ fn settings_path() -> PathBuf {
         .join("settings.json")
 }
 
+fn usage_history_path() -> PathBuf {
+    settings_path().with_file_name("usage-history.json")
+}
+
 fn load_settings() -> Settings {
     let path = settings_path();
     let Ok(content) = fs::read_to_string(path) else {
@@ -423,12 +441,16 @@ fn replace_settings_file(temp_path: &Path, path: &Path) -> Result<(), String> {
 
 fn save_settings(settings: &Settings) -> Result<(), String> {
     let path = settings_path();
+    write_json_file(&path, settings)
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let content = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    let temp_path = unique_settings_temp_path(&path);
+    let content = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    let temp_path = unique_settings_temp_path(path);
     let write_result = (|| -> Result<(), String> {
         let mut file = File::create(&temp_path).map_err(|error| error.to_string())?;
         file.write_all(format!("{content}\n").as_bytes())
@@ -436,13 +458,29 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
         file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
 
-        replace_settings_file(&temp_path, &path)
+        replace_settings_file(&temp_path, path)
     })();
 
     if write_result.is_err() {
         let _ = fs::remove_file(&temp_path);
     }
     write_result
+}
+
+fn load_usage_history() -> UsageHistory {
+    load_usage_history_from_path(&usage_history_path())
+}
+
+fn load_usage_history_from_path(path: &Path) -> UsageHistory {
+    let Ok(content) = fs::read_to_string(path) else {
+        return UsageHistory::default();
+    };
+
+    serde_json::from_str::<UsageHistory>(&content).unwrap_or_default()
+}
+
+fn save_usage_history(history: &UsageHistory) -> Result<(), String> {
+    write_json_file(&usage_history_path(), history)
 }
 
 fn current_app_version() -> String {
@@ -1352,12 +1390,102 @@ fn empty_stats(
     }
 }
 
+fn codex_usage_history_key(home: &Path) -> String {
+    home.to_string_lossy().to_string()
+}
+
+fn apply_codex_usage_history(
+    history: &mut UsageHistory,
+    home: &Path,
+    stats: &mut Stats,
+    usd_per_million_tokens: f64,
+) -> bool {
+    if let Some(paths) = stats.paths.as_object_mut() {
+        paths.insert(
+            "usageHistoryPath".to_string(),
+            Value::String(usage_history_path().to_string_lossy().to_string()),
+        );
+    }
+
+    let key = codex_usage_history_key(home);
+    let daily_history = history.codex.entry(key).or_default();
+    let mut changed = false;
+
+    for day in &stats.daily_series {
+        if day.tokens == 0 {
+            continue;
+        }
+
+        let previous_tokens = daily_history
+            .daily_tokens
+            .get(&day.date)
+            .copied()
+            .unwrap_or(0);
+        if day.tokens > previous_tokens {
+            daily_history
+                .daily_tokens
+                .insert(day.date.clone(), day.tokens);
+            changed = true;
+        }
+    }
+
+    let estimate_cost = |tokens: u64| (tokens as f64 / 1_000_000.0) * usd_per_million_tokens;
+    for day in &mut stats.daily_series {
+        if let Some(snapshot_tokens) = daily_history.daily_tokens.get(&day.date) {
+            day.tokens = day.tokens.max(*snapshot_tokens);
+        }
+        day.cost = estimate_cost(day.tokens);
+    }
+
+    let period_tokens: u64 = stats.daily_series.iter().map(|day| day.tokens).sum();
+    let today_tokens = stats.daily_series.last().map(|day| day.tokens).unwrap_or(0);
+    let latest_daily_tokens = stats
+        .daily_series
+        .iter()
+        .rev()
+        .find(|day| day.tokens > 0)
+        .map(|day| day.tokens)
+        .unwrap_or(0);
+    let history_total: u64 = daily_history.daily_tokens.values().sum();
+
+    stats.featured.today_tokens = today_tokens;
+    stats.featured.today_cost = estimate_cost(today_tokens);
+    stats.featured.period_tokens = period_tokens;
+    stats.featured.period_cost = estimate_cost(period_tokens);
+    stats.featured.latest_token_usage = if today_tokens > 0 {
+        today_tokens
+    } else {
+        stats.featured.latest_token_usage.max(latest_daily_tokens)
+    };
+    stats.featured.period_usage_percent = stats
+        .account
+        .plan_monthly_usd
+        .filter(|cost| *cost > 0.0)
+        .map(|cost| (stats.featured.period_cost / cost) * 100.0);
+    stats.featured.cost_available =
+        usd_per_million_tokens.is_finite() && usd_per_million_tokens > 0.0;
+    if period_tokens > 0 {
+        stats.featured.cost_estimated_from_token_events = true;
+    }
+    stats.totals.total_tokens = stats.totals.total_tokens.max(history_total);
+
+    changed
+}
+
+fn codex_pricing() -> Pricing {
+    Pricing {
+        label: "Codex local log estimate".to_string(),
+        url: Some("https://developers.openai.com/codex/pricing".to_string()),
+        checked_at: "2026-06-30".to_string(),
+    }
+}
+
 fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, state_db, paths) = codex_paths(settings);
 
     if !state_db.exists() {
-        return Ok(empty_stats(
+        let mut stats = empty_stats(
             "Codex",
             "CD",
             chart_days,
@@ -1366,7 +1494,20 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
                 state_db.to_string_lossy()
             ),
             paths,
-        ));
+        );
+        stats.account = read_codex_account(&home, None);
+        stats.pricing = Some(codex_pricing());
+        let mut history = load_usage_history();
+        let changed = apply_codex_usage_history(
+            &mut history,
+            &home,
+            &mut stats,
+            CODEX_USD_PER_MILLION_TOKENS,
+        );
+        if changed {
+            let _ = save_usage_history(&history);
+        }
+        return Ok(stats);
     }
 
     let mut threads = read_codex_threads(&state_db)?;
@@ -1389,22 +1530,28 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
         .max_by_key(|event| event.timestamp_ms)
         .and_then(|event| event.plan_type.as_deref());
     let account = read_codex_account(&home, latest_plan_type);
-    let pricing = Some(Pricing {
-        label: "Codex local log estimate".to_string(),
-        url: Some("https://developers.openai.com/codex/pricing".to_string()),
-        checked_at: "2026-06-30".to_string(),
-    });
-
-    Ok(build_stats_from_threads(
+    let mut stats = build_stats_from_threads(
         threads,
         Local::now(),
         chart_days,
         account,
-        pricing,
+        Some(codex_pricing()),
         Some(CODEX_USD_PER_MILLION_TOKENS),
         true,
         paths,
-    ))
+    );
+    let mut history = load_usage_history();
+    let changed = apply_codex_usage_history(
+        &mut history,
+        &home,
+        &mut stats,
+        CODEX_USD_PER_MILLION_TOKENS,
+    );
+    if changed {
+        let _ = save_usage_history(&history);
+    }
+
+    Ok(stats)
 }
 
 fn claude_home(settings: &Settings) -> PathBuf {
@@ -4107,7 +4254,7 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
             .unwrap()
             .with_timezone(&Local);
-        let timestamp_ms = DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
+        let timestamp_ms = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
             .unwrap()
             .timestamp_millis();
         let thread = Thread {
@@ -4148,6 +4295,148 @@ mod tests {
         assert_eq!(stats.featured.today_cost, 0.0);
         assert_eq!(stats.featured.period_cost, 0.0);
         assert_eq!(stats.daily_series[29].cost, 0.0);
+    }
+
+    #[test]
+    fn codex_usage_history_preserves_daily_tokens_after_source_shrinks() {
+        let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let timestamp_ms = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let home = env::temp_dir().join("ai-usage-codex-history-home-a");
+        let thread = Thread {
+            id: "codex-one".to_string(),
+            title: "Codex estimate".to_string(),
+            source: "Codex".to_string(),
+            model: "gpt-5-codex".to_string(),
+            cwd: String::new(),
+            archived: false,
+            tokens_used: 1200,
+            created_at_ms: timestamp_ms,
+            updated_at_ms: timestamp_ms,
+            rollout_path: String::new(),
+            usage_events: vec![UsageEvent {
+                thread_id: "codex-one".to_string(),
+                timestamp_ms,
+                model: "gpt-5-codex".to_string(),
+                total_tokens: 1200,
+                plan_type: None,
+                rate_limits: None,
+            }],
+        };
+        let mut history = UsageHistory::default();
+        let mut first_stats = build_stats_from_threads(
+            vec![thread],
+            now,
+            7,
+            test_account(),
+            Some(codex_pricing()),
+            Some(CODEX_USD_PER_MILLION_TOKENS),
+            true,
+            json!({ "test": true }),
+        );
+
+        assert!(apply_codex_usage_history(
+            &mut history,
+            &home,
+            &mut first_stats,
+            CODEX_USD_PER_MILLION_TOKENS,
+        ));
+
+        let mut second_stats = build_stats_from_threads(
+            Vec::new(),
+            now,
+            7,
+            test_account(),
+            Some(codex_pricing()),
+            Some(CODEX_USD_PER_MILLION_TOKENS),
+            true,
+            json!({ "test": true }),
+        );
+
+        assert!(!apply_codex_usage_history(
+            &mut history,
+            &home,
+            &mut second_stats,
+            CODEX_USD_PER_MILLION_TOKENS,
+        ));
+
+        assert_eq!(second_stats.featured.today_tokens, 1200);
+        assert_eq!(second_stats.featured.period_tokens, 1200);
+        assert_eq!(second_stats.featured.latest_token_usage, 1200);
+        assert_eq!(second_stats.totals.total_tokens, 1200);
+        assert_eq!(second_stats.daily_series.last().unwrap().tokens, 1200);
+    }
+
+    #[test]
+    fn codex_usage_history_is_scoped_by_home() {
+        let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Local);
+        let timestamp_ms = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let first_home = env::temp_dir().join("ai-usage-codex-history-home-a");
+        let second_home = env::temp_dir().join("ai-usage-codex-history-home-b");
+        let thread = Thread {
+            id: "codex-one".to_string(),
+            title: "Codex estimate".to_string(),
+            source: "Codex".to_string(),
+            model: "gpt-5-codex".to_string(),
+            cwd: String::new(),
+            archived: false,
+            tokens_used: 900,
+            created_at_ms: timestamp_ms,
+            updated_at_ms: timestamp_ms,
+            rollout_path: String::new(),
+            usage_events: vec![UsageEvent {
+                thread_id: "codex-one".to_string(),
+                timestamp_ms,
+                model: "gpt-5-codex".to_string(),
+                total_tokens: 900,
+                plan_type: None,
+                rate_limits: None,
+            }],
+        };
+        let mut history = UsageHistory::default();
+        let mut first_stats = build_stats_from_threads(
+            vec![thread],
+            now,
+            7,
+            test_account(),
+            Some(codex_pricing()),
+            Some(CODEX_USD_PER_MILLION_TOKENS),
+            true,
+            json!({ "test": true }),
+        );
+        apply_codex_usage_history(
+            &mut history,
+            &first_home,
+            &mut first_stats,
+            CODEX_USD_PER_MILLION_TOKENS,
+        );
+
+        let mut second_stats = build_stats_from_threads(
+            Vec::new(),
+            now,
+            7,
+            test_account(),
+            Some(codex_pricing()),
+            Some(CODEX_USD_PER_MILLION_TOKENS),
+            true,
+            json!({ "test": true }),
+        );
+        apply_codex_usage_history(
+            &mut history,
+            &second_home,
+            &mut second_stats,
+            CODEX_USD_PER_MILLION_TOKENS,
+        );
+
+        assert_eq!(second_stats.featured.period_tokens, 0);
+        assert_eq!(second_stats.totals.total_tokens, 0);
     }
 
     #[test]

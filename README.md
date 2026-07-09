@@ -147,14 +147,14 @@ Outputs:
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.4_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.4_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.5_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.5_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.4_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.5_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.
@@ -190,7 +190,7 @@ The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/la
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 
 ```sh
-npm run updater:latest -- --artifacts release-artifacts --output release-artifacts/latest.json --repo peipeitu/ai-usage --tag v0.1.4
+npm run updater:latest -- --artifacts release-artifacts --output release-artifacts/latest.json --repo peipeitu/ai-usage --tag v0.1.5
 ```
 
 Linux AppImage GPG signing is optional and separate from the updater signature:

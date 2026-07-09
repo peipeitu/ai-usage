@@ -252,6 +252,12 @@ const I18N = {
     updatingSoon: "即将更新",
     percentUsage: "{percent}% {plan} 使用量",
     usageEstimated: "按本地日志估算",
+    usedUsage: "{percent}% 已使用",
+    usageHeadroom: "余量 {percent}%",
+    usageOverrun: "超额 {percent}%",
+    lastsUntilReset: "持续到重置",
+    projectedEmpty: "预计 {time} 后耗尽",
+    idealUsageMarker: "理论使用 {percent}%",
     resetAt: "{label} · {time} 重置",
     waitingForLogs: "等待 {provider} 日志",
     readStatsError: "无法读取 {provider} 统计",
@@ -358,6 +364,12 @@ const I18N = {
     updatingSoon: "Updating soon",
     percentUsage: "{percent}% {plan} usage",
     usageEstimated: "Estimated from local logs",
+    usedUsage: "{percent}% used",
+    usageHeadroom: "{percent}% headroom",
+    usageOverrun: "{percent}% over pace",
+    lastsUntilReset: "Lasts until reset",
+    projectedEmpty: "Empty in {time}",
+    idealUsageMarker: "Ideal usage {percent}%",
     resetAt: "{label} · resets {time}",
     waitingForLogs: "Waiting for {provider} logs",
     readStatsError: "Unable to read {provider} stats",
@@ -614,6 +626,10 @@ function formatPercent(value) {
   return `${Math.round(Number(value) || 0)}%`;
 }
 
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
+}
+
 function formatResetTime(limit) {
   if (!limit?.resetsAt) return "-";
   const resetDate = new Date(limit.resetsAt);
@@ -660,9 +676,59 @@ function formatCountdown(value) {
   return `${seconds}s`;
 }
 
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return t("updatingSoon");
+  }
+  return formatCountdown(new Date(Date.now() + milliseconds).toISOString());
+}
+
 function formatUpdateCountdown(value) {
   const countdown = formatCountdown(value);
   return countdown === "-" ? "-" : t("updatesIn", { time: countdown });
+}
+
+function rateLimitPace(limit) {
+  const usedPercent = clampPercent(limit?.usedPercent);
+  const remainingPercent = clampPercent(limit?.remainingPercent);
+  const resetDate = new Date(limit?.resetsAt || "");
+  const resetMs = resetDate.getTime();
+  const windowMs = Number(limit?.windowMinutes || 0) * 60 * 1000;
+
+  if (!Number.isFinite(resetMs) || windowMs <= 0) {
+    return {
+      usedPercent,
+      remainingPercent,
+      idealPercent: null,
+      balancePercent: null,
+      exhaustionMs: null
+    };
+  }
+
+  const nowMs = Date.now();
+  const startMs = resetMs - windowMs;
+  const elapsedMs = Math.max(0, Math.min(windowMs, nowMs - startMs));
+  const idealPercent = clampPercent((elapsedMs / windowMs) * 100);
+  const balancePercent = idealPercent - usedPercent;
+  let exhaustionMs = null;
+
+  if (usedPercent >= 100) {
+    exhaustionMs = 0;
+  } else if (usedPercent > 0 && elapsedMs > 0) {
+    const usedPercentPerMs = usedPercent / elapsedMs;
+    const projectedMs = remainingPercent / usedPercentPerMs;
+    if (Number.isFinite(projectedMs) && nowMs + projectedMs < resetMs) {
+      exhaustionMs = Math.max(0, projectedMs);
+    }
+  }
+
+  return {
+    usedPercent,
+    remainingPercent,
+    idealPercent,
+    balancePercent,
+    exhaustionMs
+  };
 }
 
 function updateRateLimitCountdowns() {
@@ -670,7 +736,11 @@ function updateRateLimitCountdowns() {
   for (const node of nodes) {
     node.textContent = formatUpdateCountdown(node.dataset.resetCountdown);
   }
-  if (currentView !== "home" || nodes.length === 0) {
+  const exhaustionNodes = document.querySelectorAll("[data-exhaustion-countdown]");
+  for (const node of exhaustionNodes) {
+    node.textContent = t("projectedEmpty", { time: formatCountdown(node.dataset.exhaustionCountdown) });
+  }
+  if (currentView !== "home" || (nodes.length === 0 && exhaustionNodes.length === 0)) {
     stopRateLimitCountdownTimer();
   }
 }
@@ -687,7 +757,7 @@ function stopRateLimitCountdownTimer() {
 }
 
 function syncRateLimitCountdownTimer() {
-  if (currentView === "home" && document.querySelector("[data-reset-countdown]")) {
+  if (currentView === "home" && document.querySelector("[data-reset-countdown], [data-exhaustion-countdown]")) {
     startRateLimitCountdownTimer();
   } else {
     stopRateLimitCountdownTimer();
@@ -1376,17 +1446,17 @@ function renderRateLimits(rateLimits) {
     : "-";
 
   for (const limit of rateLimits.windows) {
+    const pace = rateLimitPace(limit);
     const row = document.createElement("div");
     row.className = "limit-row";
+    row.classList.toggle("overrun", Number(pace.balancePercent) < 0);
 
     const label = document.createElement("strong");
     label.textContent = formatLimitLabel(limit);
 
-    const remaining = document.createElement("span");
-    remaining.textContent = formatPercent(limit.remainingPercent);
-
-    const reset = document.createElement("span");
-    reset.textContent = formatResetTime(limit);
+    const used = document.createElement("span");
+    used.className = "limit-used";
+    used.textContent = t("usedUsage", { percent: Math.round(pace.usedPercent) });
 
     const countdown = document.createElement("span");
     countdown.className = "limit-countdown";
@@ -1395,9 +1465,37 @@ function renderRateLimits(rateLimits) {
 
     const meter = document.createElement("div");
     meter.className = "limit-meter";
-    meter.style.setProperty("--remaining", `${Math.max(0, Math.min(100, Number(limit.remainingPercent) || 0))}%`);
+    meter.classList.toggle("no-ideal", pace.idealPercent === null);
+    meter.style.setProperty("--used", `${pace.usedPercent}%`);
+    meter.style.setProperty("--ideal", `${pace.idealPercent ?? 0}%`);
+    if (pace.idealPercent !== null) {
+      meter.setAttribute("title", t("idealUsageMarker", { percent: Math.round(pace.idealPercent) }));
+    }
 
-    row.append(label, remaining, reset, countdown, meter);
+    const paceLine = document.createElement("div");
+    paceLine.className = "limit-pace";
+
+    const balance = document.createElement("span");
+    const balancePercent = Math.round(Math.abs(Number(pace.balancePercent) || 0));
+    balance.className = Number(pace.balancePercent) < 0 ? "limit-overrun" : "limit-headroom";
+    balance.textContent =
+      pace.balancePercent === null
+        ? t("usageHeadroom", { percent: Math.round(pace.remainingPercent) })
+        : Number(pace.balancePercent) < 0
+          ? t("usageOverrun", { percent: balancePercent })
+          : t("usageHeadroom", { percent: balancePercent });
+
+    const projection = document.createElement("span");
+    projection.className = "limit-projection";
+    if (pace.exhaustionMs === null) {
+      projection.textContent = t("lastsUntilReset");
+    } else {
+      projection.dataset.exhaustionCountdown = new Date(Date.now() + pace.exhaustionMs).toISOString();
+      projection.textContent = t("projectedEmpty", { time: formatDuration(pace.exhaustionMs) });
+    }
+
+    paceLine.append(balance, projection);
+    row.append(label, used, countdown, meter, paceLine);
     elements.rateLimitList.append(row);
   }
 

@@ -14,6 +14,7 @@
   --bar-low: #d6eaf8;
   --bar-mid: #85c1e9;
   --bar-high: #2980b9;
+  --danger: #d7263d;
   --tooltip: #1f2420;
   --shadow-soft: 0 16px 44px rgba(40, 47, 57, 0.08);
   --shadow-tight: 0 8px 24px rgba(40, 47, 57, 0.08);
@@ -93,6 +94,7 @@ body[data-theme="dark"] {
   --bar-low: #1f3b53;
   --bar-mid: #2e86c1;
   --bar-high: #5dade2;
+  --danger: #ff6b6b;
   --tooltip: #eef2eb;
   --shadow-soft: 0 18px 48px rgba(0, 0, 0, 0.28);
   --shadow-tight: 0 10px 26px rgba(0, 0, 0, 0.24);
@@ -1114,7 +1116,7 @@ h2 {
 
 .limit-row {
   display: grid;
-  grid-template-columns: minmax(64px, 1fr) auto auto minmax(112px, auto);
+  grid-template-columns: minmax(64px, 1fr) auto minmax(112px, auto);
   align-items: center;
   gap: 11px 12px;
   border: 0;
@@ -1136,10 +1138,16 @@ h2 {
 
 .limit-row span {
   color: var(--muted);
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 460;
   line-height: 1;
   font-variant-numeric: tabular-nums;
+}
+
+.limit-row .limit-used {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 560;
 }
 
 .limit-row .limit-countdown {
@@ -1152,19 +1160,67 @@ h2 {
 
 .limit-meter {
   grid-column: 1 / -1;
+  position: relative;
   overflow: hidden;
-  height: 5px;
+  height: 7px;
   border-radius: 999px;
   background: var(--panel-soft);
 }
 
 .limit-meter::before {
   display: block;
-  width: var(--remaining);
+  width: var(--used);
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
   content: "";
+}
+
+.limit-meter::after {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: var(--ideal);
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 56%, transparent);
+  box-shadow:
+    -6px 0 0 color-mix(in srgb, var(--ink) 22%, transparent),
+    6px 0 0 color-mix(in srgb, var(--ink) 22%, transparent);
+  content: "";
+  transform: translateX(-1px);
+}
+
+.limit-meter.no-ideal::after {
+  display: none;
+}
+
+.limit-row.overrun .limit-meter::before {
+  background: var(--danger);
+}
+
+.limit-pace {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.limit-pace span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.limit-pace .limit-overrun {
+  color: var(--danger);
+  font-weight: 560;
+}
+
+.limit-pace .limit-projection {
+  text-align: right;
 }
 
 .rank-list.columns {
