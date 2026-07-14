@@ -25,6 +25,7 @@ const aiUsage = window.aiUsage || {
   chooseHome: (provider) => tauriCore.invoke("choose_home", { provider }),
   getSettings: () => tauriCore.invoke("get_settings"),
   updateSettings: (settings) => tauriCore.invoke("update_settings", { settings }),
+  syncTrayLanguage: (language) => tauriCore.invoke("sync_tray_language", { language }),
   checkUpdate: () => tauriCore.invoke("check_update"),
   installUpdate: () => tauriCore.invoke("install_update"),
   openExternal: (url) => tauriCore.invoke("open_external", { url }),
@@ -829,8 +830,23 @@ function resetAutoRefreshTimer() {
   scheduleAutoRefreshTimer();
 }
 
+function availableRateLimitWindows(rateLimits) {
+  if (!Array.isArray(rateLimits?.windows)) return [];
+  return rateLimits.windows.filter((window) => {
+    const usedPercent = Number(window?.usedPercent);
+    const remainingPercent = Number(window?.remainingPercent);
+    const windowMinutes = Number(window?.windowMinutes);
+    return (
+      Number.isFinite(usedPercent) &&
+      Number.isFinite(remainingPercent) &&
+      Number.isFinite(windowMinutes) &&
+      windowMinutes > 0
+    );
+  });
+}
+
 function primaryRateLimit(stats) {
-  return stats.rateLimits?.windows?.[0] || null;
+  return availableRateLimitWindows(stats.rateLimits)[0] || null;
 }
 
 function formatLimitLabel(limit) {
@@ -1430,8 +1446,9 @@ function renderRankList(container, items, options = {}) {
 
 function renderRateLimits(rateLimits) {
   elements.rateLimitList.replaceChildren();
+  const windows = availableRateLimitWindows(rateLimits);
 
-  if (!rateLimits?.windows?.length) {
+  if (!windows.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
     empty.textContent = t("emptyRateLimits");
@@ -1445,7 +1462,7 @@ function renderRateLimits(rateLimits) {
     ? t("updatedAt", { date: formatDate(rateLimits.updatedAt) })
     : "-";
 
-  for (const limit of rateLimits.windows) {
+  for (const limit of windows) {
     const pace = rateLimitPace(limit);
     const row = document.createElement("div");
     row.className = "limit-row";
@@ -1771,6 +1788,9 @@ async function saveSettings(nextSettings, shouldRefresh = true) {
     ...currentSettings,
     ...normalizedNextSettings
   });
+  if (languageChanged) {
+    await aiUsage.syncTrayLanguage?.(currentLanguage());
+  }
   settingsSavedAt = new Date();
   renderSettings();
   if (languageChanged && lastStats) {
@@ -1951,6 +1971,7 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 });
 window.addEventListener("languagechange", () => {
   if (currentSettings.language !== "auto") return;
+  Promise.resolve(aiUsage.syncTrayLanguage?.(currentLanguage())).catch(() => {});
   renderSettings();
   if (lastStats) {
     renderStats(lastStats);
@@ -1964,6 +1985,7 @@ window.addEventListener("keydown", (event) => {
 
 async function boot() {
   currentSettings = await aiUsage.getSettings();
+  await aiUsage.syncTrayLanguage?.(currentLanguage());
   renderSettings();
   resetAutoRefreshTimer();
   setView(currentView);

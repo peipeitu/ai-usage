@@ -32,6 +32,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-updater",
  "time",
+ "tokio",
  "url",
  "walkdir",
 ]

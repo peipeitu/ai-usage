@@ -7,7 +7,10 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +19,11 @@ use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_updater::UpdaterExt;
 use walkdir::WalkDir;
@@ -37,7 +45,30 @@ const CLAUDE_ESTIMATED_5H_TOKEN_LIMIT: u64 = 500_000;
 const CLAUDE_ESTIMATED_WEEKLY_TOKEN_LIMIT: u64 = 2_500_000;
 const CHATGPT_ESTIMATED_3H_ACTIVITY_LIMIT: u64 = 80;
 const CHATGPT_ESTIMATED_WEEKLY_ACTIVITY_LIMIT: u64 = 500;
+const TRAY_ID: &str = "ai-usage-status";
+const TRAY_OPEN_MENU_ID: &str = "tray-open";
+const TRAY_QUIT_MENU_ID: &str = "tray-quit";
+const TRAY_REFRESH_INTERVAL_SECONDS: u64 = 5 * 60;
 static SETTINGS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayLanguage {
+    Zh,
+    En,
+}
+
+#[derive(Clone, Debug)]
+struct TrayDisplayState {
+    language: TrayLanguage,
+    active_provider: String,
+    remaining_percent: Option<u8>,
+}
+
+struct TrayUiState {
+    display: Mutex<TrayDisplayState>,
+    open_item: MenuItem<tauri::Wry>,
+    quit_item: MenuItem<tauri::Wry>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -520,31 +551,333 @@ fn unsupported_update_info() -> UpdateInfo {
     }
 }
 
+fn provider_label(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "Claude Code",
+        "copilot" => "GitHub Copilot",
+        "cursor" => "Cursor",
+        "chatgpt" => "ChatGPT",
+        _ => "Codex",
+    }
+}
+
+fn tray_language(language: &str) -> TrayLanguage {
+    let language = if language == "auto" {
+        env::var("LANG").unwrap_or_default()
+    } else {
+        language.to_string()
+    };
+    if language.to_lowercase().starts_with("zh") {
+        TrayLanguage::Zh
+    } else {
+        TrayLanguage::En
+    }
+}
+
+fn tray_menu_labels(language: TrayLanguage) -> (&'static str, &'static str) {
+    match language {
+        TrayLanguage::Zh => ("打开 AI Usage", "退出"),
+        TrayLanguage::En => ("Open AI Usage", "Quit"),
+    }
+}
+
+impl TrayDisplayState {
+    fn update_usage(&mut self, provider: &str, remaining_percent: Option<u8>) -> bool {
+        if self.active_provider != provider {
+            return false;
+        }
+        self.remaining_percent = remaining_percent;
+        true
+    }
+}
+
+fn tray_tooltip(display: &TrayDisplayState) -> String {
+    let provider = provider_label(&display.active_provider);
+    match (display.language, display.remaining_percent) {
+        (TrayLanguage::Zh, Some(percent)) => {
+            format!("AI Usage · {provider} · 剩余 {percent}%")
+        }
+        (TrayLanguage::En, Some(percent)) => {
+            format!("AI Usage · {provider} · {percent}% remaining")
+        }
+        (_, None) => format!("AI Usage · {provider}"),
+    }
+}
+
+fn tray_remaining_percent(rate_limits: Option<&RateLimits>) -> Option<u8> {
+    let windows = &rate_limits?.windows;
+    let window = windows
+        .iter()
+        .filter(|window| is_available_rate_limit_window(window))
+        .find(|window| window.id == "primary")
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|window| is_available_rate_limit_window(window))
+        })?;
+    Some(window.remaining_percent.clamp(0.0, 100.0).round() as u8)
+}
+
+fn is_available_rate_limit_window(window: &RateLimitWindow) -> bool {
+    window.window_minutes > 0
+        && window.used_percent.is_finite()
+        && window.remaining_percent.is_finite()
+}
+
+fn apply_tray_display(app: &tauri::AppHandle, display: &TrayDisplayState) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+
+    let title = display
+        .remaining_percent
+        .map(|percent| format!("{percent}%"))
+        .unwrap_or_else(|| "--%".to_string());
+
+    let _ = tray.set_title(Some(title));
+    let _ = tray.set_tooltip(Some(tray_tooltip(display)));
+}
+
+fn update_tray_usage(app: &tauri::AppHandle, provider: &str, stats: &Stats) {
+    let Some(state) = app.try_state::<TrayUiState>() else {
+        return;
+    };
+    let remaining = tray_remaining_percent(stats.rate_limits.as_ref());
+    let mut display = state
+        .display
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !display.update_usage(provider, remaining) {
+        return;
+    }
+    apply_tray_display(app, &display);
+}
+
+fn set_tray_active_provider(app: &tauri::AppHandle, provider: &str) {
+    let Some(state) = app.try_state::<TrayUiState>() else {
+        return;
+    };
+    let mut display = state
+        .display
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if display.active_provider == provider {
+        return;
+    }
+    display.active_provider = provider.to_string();
+    display.remaining_percent = None;
+    apply_tray_display(app, &display);
+}
+
+async fn refresh_active_tray_usage(app: tauri::AppHandle) {
+    let result = tauri::async_runtime::spawn_blocking(|| {
+        let settings = load_settings();
+        let provider = settings.active_provider.clone();
+        let stats = read_stats_for_provider(&settings, &provider)?;
+        Ok::<_, String>((provider, stats))
+    })
+    .await;
+
+    if let Ok(Ok((provider, stats))) = result {
+        update_tray_usage(&app, &provider, &stats);
+    }
+}
+
+fn start_tray_auto_refresh(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                TRAY_REFRESH_INTERVAL_SECONDS,
+            ))
+            .await;
+            refresh_active_tray_usage(app.clone()).await;
+        }
+    });
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[cfg(target_os = "macos")]
+fn paint_tray_icon_disc(rgba: &mut [u8], center_x: i32, center_y: i32, radius: i32) {
+    const SIZE: i32 = 32;
+    for y in (center_y - radius)..=(center_y + radius) {
+        for x in (center_x - radius)..=(center_x + radius) {
+            if x < 0
+                || y < 0
+                || x >= SIZE
+                || y >= SIZE
+                || (x - center_x).pow(2) + (y - center_y).pow(2) > radius.pow(2)
+            {
+                continue;
+            }
+            let pixel = (y as usize * SIZE as usize + x as usize) * 4;
+            rgba[pixel + 3] = u8::MAX;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn paint_tray_icon_segment(rgba: &mut [u8], start: (i32, i32), end: (i32, i32)) {
+    let steps = (end.0 - start.0).abs().max((end.1 - start.1).abs());
+    for step in 0..=steps {
+        let x = start.0 + (end.0 - start.0) * step / steps;
+        let y = start.1 + (end.1 - start.1) * step / steps;
+        paint_tray_icon_disc(rgba, x, y, 2);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tray_template_icon() -> tauri::image::Image<'static> {
+    const SIZE: usize = 32;
+    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
+    let points = [
+        (2, 16),
+        (8, 16),
+        (11, 7),
+        (16, 25),
+        (21, 11),
+        (25, 16),
+        (30, 16),
+    ];
+
+    for segment in points.windows(2) {
+        paint_tray_icon_segment(&mut rgba, segment[0], segment[1]);
+    }
+
+    tauri::image::Image::new_owned(rgba, SIZE as u32, SIZE as u32)
+}
+
+fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if matches!(event, tauri::RunEvent::Reopen { .. }) {
+        show_main_window(app);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, event);
+}
+
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = load_settings();
+    let language = tray_language(&settings.language);
+    let (open_label, quit_label) = tray_menu_labels(language);
+    let open = MenuItem::with_id(app, TRAY_OPEN_MENU_ID, open_label, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_MENU_ID, quit_label, true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .title("--%")
+        .tooltip("AI Usage")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_OPEN_MENU_ID => show_main_window(app),
+            TRAY_QUIT_MENU_ID => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    #[cfg(target_os = "macos")]
+    {
+        tray = tray.icon(tray_template_icon()).icon_as_template(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)?;
+    let display = TrayDisplayState {
+        language,
+        active_provider: settings.active_provider,
+        remaining_percent: None,
+    };
+    let initial_display = display.clone();
+    if !app.manage(TrayUiState {
+        display: Mutex::new(display),
+        open_item: open,
+        quit_item: quit,
+    }) {
+        return Err("tray state is already initialized".into());
+    }
+    apply_tray_display(app.handle(), &initial_display);
+    start_tray_auto_refresh(app.handle().clone());
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_tray_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    let language = tray_language(&language);
+    let Some(state) = app.try_state::<TrayUiState>() else {
+        return Err("tray state is not initialized".to_string());
+    };
+    let (open_label, quit_label) = tray_menu_labels(language);
+    state
+        .open_item
+        .set_text(open_label)
+        .map_err(|error| error.to_string())?;
+    state
+        .quit_item
+        .set_text(quit_label)
+        .map_err(|error| error.to_string())?;
+    let mut display = state
+        .display
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    display.language = language;
+    apply_tray_display(&app, &display);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_settings() -> Settings {
     load_settings()
 }
 
 #[tauri::command]
-fn update_settings(settings: Settings) -> Result<Settings, String> {
+fn update_settings(app: tauri::AppHandle, settings: Settings) -> Result<Settings, String> {
     let settings = normalize_settings(settings);
     save_settings(&settings)?;
+    set_tray_active_provider(&app, &settings.active_provider);
     Ok(settings)
 }
 
 #[tauri::command]
-async fn get_stats(provider: Option<String>) -> Result<Stats, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+async fn get_stats(app: tauri::AppHandle, provider: Option<String>) -> Result<Stats, String> {
+    let (provider, stats) = tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings();
         let provider = provider.unwrap_or_else(|| settings.active_provider.clone());
-        read_stats_for_provider(&settings, &provider)
+        let stats = read_stats_for_provider(&settings, &provider)?;
+        Ok::<_, String>((provider, stats))
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    update_tray_usage(&app, &provider, &stats);
+    Ok(stats)
 }
 
 #[tauri::command]
-async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, String> {
+async fn choose_home(
+    app: tauri::AppHandle,
+    provider: String,
+) -> Result<Option<ChooseHomeResult>, String> {
     let provider = match provider.as_str() {
         "claude" => "claude",
         "copilot" => "copilot",
@@ -566,7 +899,7 @@ async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, Strin
     };
 
     let folder = folder.to_string_lossy().to_string();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let mut settings = load_settings();
         settings.active_provider = provider.clone();
         match provider.as_str() {
@@ -580,10 +913,18 @@ async fn choose_home(provider: String) -> Result<Option<ChooseHomeResult>, Strin
         save_settings(&settings)?;
         let stats = read_stats_for_provider(&settings, &provider)?;
 
-        Ok(Some(ChooseHomeResult { settings, stats }))
+        Ok::<_, String>(Some(ChooseHomeResult { settings, stats }))
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    if let Some(result) = &result {
+        let active_provider = load_settings().active_provider;
+        if result.settings.active_provider == active_provider {
+            set_tray_active_provider(&app, &active_provider);
+            update_tray_usage(&app, &active_provider, &result.stats);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1021,12 +1362,12 @@ fn normalize_rate_limit_window(id: &str, window: Option<&Value>) -> Option<RateL
     let used_percent = window
         .get("used_percent")
         .and_then(Value::as_f64)
-        .unwrap_or(0.0)
+        .filter(|percent| percent.is_finite())?
         .clamp(0.0, 100.0);
     let window_minutes = window
         .get("window_minutes")
         .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .filter(|minutes| *minutes > 0)?;
     let resets_at = window
         .get("resets_at")
         .and_then(Value::as_i64)
@@ -1044,13 +1385,17 @@ fn normalize_rate_limit_window(id: &str, window: Option<&Value>) -> Option<RateL
 
 fn normalize_rate_limits(rate_limits: Option<&Value>, timestamp_ms: i64) -> Option<RateLimits> {
     let rate_limits = rate_limits?;
-    let windows = [
+    let windows: Vec<_> = [
         normalize_rate_limit_window("primary", rate_limits.get("primary")),
         normalize_rate_limit_window("secondary", rate_limits.get("secondary")),
     ]
     .into_iter()
     .flatten()
     .collect();
+
+    if windows.is_empty() {
+        return None;
+    }
 
     Some(RateLimits {
         updated_at: iso_from_ms(timestamp_ms),
@@ -4130,10 +4475,21 @@ fn main() {
         builder
     };
 
-    builder
+    let app = builder
+        .setup(setup_tray)
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
+            sync_tray_language,
             get_stats,
             choose_home,
             start_window_drag,
@@ -4141,8 +4497,9 @@ fn main() {
             check_update,
             install_update
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running AI Usage");
+        .build(tauri::generate_context!())
+        .expect("error while building AI Usage");
+    app.run(handle_run_event);
 }
 
 #[cfg(test)]
@@ -4164,6 +4521,131 @@ mod tests {
             plan_label: "Codex".to_string(),
             plan_monthly_usd: None,
         }
+    }
+
+    fn test_rate_limit_window(id: &str, remaining_percent: f64) -> RateLimitWindow {
+        RateLimitWindow {
+            id: id.to_string(),
+            label: id.to_string(),
+            used_percent: 100.0 - remaining_percent,
+            remaining_percent,
+            window_minutes: 300,
+            resets_at: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tray_template_icon_is_square_with_transparent_background() {
+        let icon = tray_template_icon();
+        let alpha = icon.rgba().iter().skip(3).step_by(4).copied();
+
+        assert_eq!(icon.width(), 32);
+        assert_eq!(icon.height(), 32);
+        assert!(alpha.clone().any(|value| value == 0));
+        assert!(alpha.clone().any(|value| value == u8::MAX));
+        assert_eq!(icon.rgba()[3], 0);
+    }
+
+    #[test]
+    fn tray_remaining_percent_prefers_primary_window_and_rounds() {
+        let rate_limits = RateLimits {
+            updated_at: None,
+            plan_type: None,
+            reached_type: None,
+            windows: vec![
+                test_rate_limit_window("secondary", 88.0),
+                test_rate_limit_window("primary", 42.6),
+            ],
+        };
+
+        assert_eq!(tray_remaining_percent(Some(&rate_limits)), Some(43));
+    }
+
+    #[test]
+    fn tray_remaining_percent_falls_back_to_first_window_and_clamps() {
+        let rate_limits = RateLimits {
+            updated_at: None,
+            plan_type: None,
+            reached_type: None,
+            windows: vec![test_rate_limit_window("rolling", 104.0)],
+        };
+
+        assert_eq!(tray_remaining_percent(Some(&rate_limits)), Some(100));
+        assert_eq!(tray_remaining_percent(None), None);
+    }
+
+    #[test]
+    fn tray_display_rejects_usage_from_inactive_provider() {
+        let mut display = TrayDisplayState {
+            language: TrayLanguage::Zh,
+            active_provider: "codex".to_string(),
+            remaining_percent: Some(50),
+        };
+
+        assert!(!display.update_usage("claude", Some(90)));
+        assert_eq!(display.remaining_percent, Some(50));
+        assert!(display.update_usage("codex", Some(45)));
+        assert_eq!(display.remaining_percent, Some(45));
+    }
+
+    #[test]
+    fn tray_copy_follows_selected_language() {
+        assert_eq!(tray_language("zh-CN"), TrayLanguage::Zh);
+        assert_eq!(tray_language("en-US"), TrayLanguage::En);
+        assert_eq!(
+            tray_menu_labels(TrayLanguage::Zh),
+            ("打开 AI Usage", "退出")
+        );
+        assert_eq!(
+            tray_menu_labels(TrayLanguage::En),
+            ("Open AI Usage", "Quit")
+        );
+
+        let mut display = TrayDisplayState {
+            language: TrayLanguage::Zh,
+            active_provider: "codex".to_string(),
+            remaining_percent: Some(47),
+        };
+        assert_eq!(tray_tooltip(&display), "AI Usage · Codex · 剩余 47%");
+
+        display.language = TrayLanguage::En;
+        assert_eq!(tray_tooltip(&display), "AI Usage · Codex · 47% remaining");
+    }
+
+    #[test]
+    fn tray_refresh_interval_is_five_minutes() {
+        assert_eq!(TRAY_REFRESH_INTERVAL_SECONDS, 300);
+    }
+
+    #[test]
+    fn normalize_rate_limits_keeps_only_available_periods() {
+        let weekly_only = normalize_rate_limits(
+            Some(&json!({
+                "plan_type": "prolite",
+                "primary": {
+                    "used_percent": 52.0,
+                    "window_minutes": 10080,
+                    "resets_at": 1784509607
+                },
+                "secondary": null
+            })),
+            1784019200000,
+        )
+        .expect("weekly rate limit should be available");
+
+        assert_eq!(weekly_only.windows.len(), 1);
+        assert_eq!(weekly_only.windows[0].label, "1 周");
+        assert_eq!(weekly_only.windows[0].remaining_percent, 48.0);
+
+        assert!(normalize_rate_limits(
+            Some(&json!({
+                "primary": { "used_percent": 12.0 },
+                "secondary": null
+            })),
+            1784019200000,
+        )
+        .is_none());
     }
 
     #[test]
@@ -4546,7 +5028,8 @@ mod tests {
                 "info": null,
                 "rate_limits": {
                   "plan_type": "prolite",
-                  "primary": { "used_percent": 12, "window_minutes": 300, "resets_at": 1782833640 }
+                  "primary": { "used_percent": 12, "window_minutes": 10080, "resets_at": 1783478400 },
+                  "secondary": null
                 }
               }
             }),
@@ -4561,7 +5044,8 @@ mod tests {
                 },
                 "rate_limits": {
                   "plan_type": "prolite",
-                  "primary": { "used_percent": 13, "window_minutes": 300, "resets_at": 1782833640 }
+                  "primary": { "used_percent": 13, "window_minutes": 10080, "resets_at": 1783478400 },
+                  "secondary": null
                 }
               }
             }),
@@ -4576,7 +5060,8 @@ mod tests {
                 },
                 "rate_limits": {
                   "plan_type": "prolite",
-                  "primary": { "used_percent": 14, "window_minutes": 300, "resets_at": 1782833640 }
+                  "primary": { "used_percent": 14, "window_minutes": 10080, "resets_at": 1783478400 },
+                  "secondary": null
                 }
               }
             }),
@@ -4591,7 +5076,8 @@ mod tests {
                 },
                 "rate_limits": {
                   "plan_type": "prolite",
-                  "primary": { "used_percent": 15, "window_minutes": 300, "resets_at": 1782833640 }
+                  "primary": { "used_percent": 15, "window_minutes": 10080, "resets_at": 1783478400 },
+                  "secondary": null
                 }
               }
             }),
@@ -4646,6 +5132,8 @@ mod tests {
         );
 
         assert_eq!(stats.featured.period_tokens, 150);
+        assert_eq!(stats.rate_limits.as_ref().unwrap().windows.len(), 1);
+        assert_eq!(stats.rate_limits.as_ref().unwrap().windows[0].label, "1 周");
         assert_eq!(
             stats.rate_limits.as_ref().unwrap().windows[0].remaining_percent,
             85.0
@@ -4662,8 +5150,8 @@ mod tests {
         let rate_limits = normalize_rate_limits(
             Some(&json!({
               "plan_type": "prolite",
-              "primary": { "used_percent": 8, "window_minutes": 300, "resets_at": 1782833640 },
-              "secondary": { "used_percent": 6, "window_minutes": 10080, "resets_at": 1783478400 }
+              "primary": { "used_percent": 8, "window_minutes": 10080, "resets_at": 1783478400 },
+              "secondary": null
             })),
             DateTime::parse_from_rfc3339("2026-06-30T11:00:00.000Z")
                 .unwrap()
@@ -4743,10 +5231,7 @@ mod tests {
         assert_eq!(stats.featured.period_cost, 0.0017);
         assert_eq!(stats.featured.latest_token_usage, 1500);
         assert!(stats.featured.cost_estimated_from_token_events);
-        assert_eq!(
-            stats.rate_limits.as_ref().unwrap().windows[0].label,
-            "5 小时"
-        );
+        assert_eq!(stats.rate_limits.as_ref().unwrap().windows[0].label, "1 周");
         assert_eq!(
             stats.rate_limits.as_ref().unwrap().windows[0].remaining_percent,
             92.0
