@@ -1276,6 +1276,7 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
+            #[cfg(target_os = "windows")]
             if let TrayIconEvent::Click {
                 rect,
                 button: MouseButton::Left,
@@ -1283,20 +1284,25 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } = event
             {
-                #[cfg(target_os = "windows")]
-                {
-                    let scale_factor = tray
-                        .app_handle()
-                        .get_webview_window(TRAY_STATUS_WINDOW_LABEL)
-                        .and_then(|window| window.scale_factor().ok())
-                        .unwrap_or(1.0);
-                    toggle_tray_status_window(
-                        tray.app_handle(),
-                        rect.position.to_physical(scale_factor),
-                        rect.size.to_physical(scale_factor),
-                    );
-                }
-                #[cfg(not(target_os = "windows"))]
+                let scale_factor = tray
+                    .app_handle()
+                    .get_webview_window(TRAY_STATUS_WINDOW_LABEL)
+                    .and_then(|window| window.scale_factor().ok())
+                    .unwrap_or(1.0);
+                toggle_tray_status_window(
+                    tray.app_handle(),
+                    rect.position.to_physical(scale_factor),
+                    rect.size.to_physical(scale_factor),
+                );
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 show_main_window(tray.app_handle());
             }
         });
