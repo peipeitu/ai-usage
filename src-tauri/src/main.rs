@@ -9,7 +9,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,11 +22,18 @@ use serde_json::{json, Value};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
+#[cfg(any(test, target_os = "windows"))]
+use tauri::{PhysicalPosition, PhysicalSize};
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_updater::UpdaterExt;
 use walkdir::WalkDir;
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{LPARAM, WPARAM},
+    UI::WindowsAndMessaging::{CreateIcon, DestroyIcon, SendMessageW, HICON, ICON_BIG, WM_SETICON},
+};
 
 #[cfg(any(windows, target_os = "linux"))]
 const UPDATE_ENDPOINT: &str =
@@ -46,9 +53,9 @@ const CLAUDE_ESTIMATED_WEEKLY_TOKEN_LIMIT: u64 = 2_500_000;
 const CHATGPT_ESTIMATED_3H_ACTIVITY_LIMIT: u64 = 80;
 const CHATGPT_ESTIMATED_WEEKLY_ACTIVITY_LIMIT: u64 = 500;
 const TRAY_ID: &str = "ai-usage-status";
+const TRAY_STATUS_WINDOW_LABEL: &str = "tray-status";
 const TRAY_OPEN_MENU_ID: &str = "tray-open";
 const TRAY_QUIT_MENU_ID: &str = "tray-quit";
-const TRAY_REFRESH_INTERVAL_SECONDS: u64 = 5 * 60;
 static SETTINGS_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,12 +69,67 @@ struct TrayDisplayState {
     language: TrayLanguage,
     active_provider: String,
     remaining_percent: Option<u8>,
+    theme: String,
+    accent_color: String,
+    auto_refresh_enabled: bool,
+    auto_refresh_minutes: u32,
+    is_refreshing: bool,
+    refresh_failed: bool,
+    refresh_in_flight: bool,
+    pending_refresh_request_id: Option<u64>,
+    latest_refresh_request_id: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayStatusPayload {
+    provider: String,
+    provider_label: String,
+    remaining_percent: Option<u8>,
+    usage_label: String,
+    status_label: String,
+    open_label: String,
+    language: String,
+    theme: String,
+    accent_color: String,
 }
 
 struct TrayUiState {
     display: Mutex<TrayDisplayState>,
+    auto_refresh_notify: Arc<tokio::sync::Notify>,
+    stats_scan_lock: Arc<Mutex<()>>,
     open_item: MenuItem<tauri::Wry>,
     quit_item: MenuItem<tauri::Wry>,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsTaskbarIcon(Mutex<isize>);
+
+#[cfg(target_os = "windows")]
+impl WindowsTaskbarIcon {
+    fn replace(&self, icon: isize) {
+        let mut current = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::mem::replace(&mut *current, icon);
+        if previous != 0 {
+            let _ = unsafe { DestroyIcon(HICON(previous as _)) };
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsTaskbarIcon {
+    fn drop(&mut self) {
+        let icon = self
+            .0
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *icon != 0 {
+            let _ = unsafe { DestroyIcon(HICON(*icon as _)) };
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -587,7 +649,15 @@ impl TrayDisplayState {
             return false;
         }
         self.remaining_percent = remaining_percent;
+        self.refresh_failed = false;
         true
+    }
+
+    fn next_refresh_request(&mut self) -> u64 {
+        self.latest_refresh_request_id = self.latest_refresh_request_id.wrapping_add(1).max(1);
+        self.is_refreshing = true;
+        self.refresh_failed = false;
+        self.latest_refresh_request_id
     }
 }
 
@@ -624,73 +694,326 @@ fn is_available_rate_limit_window(window: &RateLimitWindow) -> bool {
         && window.remaining_percent.is_finite()
 }
 
+fn tray_status_payload(display: &TrayDisplayState) -> TrayStatusPayload {
+    let (usage_label, open_label, language) = match display.language {
+        TrayLanguage::Zh => ("剩余用量", "打开详情", "zh-CN"),
+        TrayLanguage::En => ("Remaining usage", "Open details", "en"),
+    };
+    let status_label = match display.language {
+        TrayLanguage::Zh if display.is_refreshing => "正在更新...".to_string(),
+        TrayLanguage::En if display.is_refreshing => "Updating...".to_string(),
+        TrayLanguage::Zh if display.refresh_failed && display.remaining_percent.is_some() => {
+            "更新失败，显示上次数据".to_string()
+        }
+        TrayLanguage::En if display.refresh_failed && display.remaining_percent.is_some() => {
+            "Update failed, showing previous data".to_string()
+        }
+        TrayLanguage::Zh if display.refresh_failed => "更新失败".to_string(),
+        TrayLanguage::En if display.refresh_failed => "Update failed".to_string(),
+        TrayLanguage::Zh if display.remaining_percent.is_none() => "暂无可用数据".to_string(),
+        TrayLanguage::En if display.remaining_percent.is_none() => "Usage unavailable".to_string(),
+        TrayLanguage::Zh if display.auto_refresh_enabled => {
+            format!("每 {} 分钟更新", display.auto_refresh_minutes)
+        }
+        TrayLanguage::En if display.auto_refresh_enabled => {
+            format!("Updates every {} min", display.auto_refresh_minutes)
+        }
+        TrayLanguage::Zh => "自动更新已关闭".to_string(),
+        TrayLanguage::En => "Auto refresh is off".to_string(),
+    };
+
+    TrayStatusPayload {
+        provider: display.active_provider.clone(),
+        provider_label: provider_label(&display.active_provider).to_string(),
+        remaining_percent: display.remaining_percent,
+        usage_label: usage_label.to_string(),
+        status_label,
+        open_label: open_label.to_string(),
+        language: language.to_string(),
+        theme: display.theme.clone(),
+        accent_color: display.accent_color.clone(),
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn tray_status_window_position(
+    tray_position: PhysicalPosition<f64>,
+    tray_size: PhysicalSize<u32>,
+    window_size: PhysicalSize<u32>,
+    monitor_position: PhysicalPosition<i32>,
+    monitor_size: PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    const MARGIN: f64 = 8.0;
+
+    let monitor_left = f64::from(monitor_position.x);
+    let monitor_top = f64::from(monitor_position.y);
+    let monitor_right = monitor_left + f64::from(monitor_size.width);
+    let monitor_bottom = monitor_top + f64::from(monitor_size.height);
+    let tray_center_x = tray_position.x + f64::from(tray_size.width) / 2.0;
+    let tray_center_y = tray_position.y + f64::from(tray_size.height) / 2.0;
+    let window_width = f64::from(window_size.width);
+    let window_height = f64::from(window_size.height);
+    let distances = [
+        tray_center_y - monitor_top,
+        monitor_right - tray_center_x,
+        monitor_bottom - tray_center_y,
+        tray_center_x - monitor_left,
+    ];
+    let nearest_edge = distances
+        .iter()
+        .enumerate()
+        .min_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .unwrap_or(2);
+
+    let (x, y) = match nearest_edge {
+        0 => (
+            tray_center_x - window_width / 2.0,
+            tray_position.y + f64::from(tray_size.height) + MARGIN,
+        ),
+        1 => (
+            tray_position.x - window_width - MARGIN,
+            tray_center_y - window_height / 2.0,
+        ),
+        3 => (
+            tray_position.x + f64::from(tray_size.width) + MARGIN,
+            tray_center_y - window_height / 2.0,
+        ),
+        _ => (
+            tray_center_x - window_width / 2.0,
+            tray_position.y - window_height - MARGIN,
+        ),
+    };
+    let min_x = monitor_left + MARGIN;
+    let min_y = monitor_top + MARGIN;
+    let max_x = (monitor_right - window_width - MARGIN).max(min_x);
+    let max_y = (monitor_bottom - window_height - MARGIN).max(min_y);
+
+    PhysicalPosition::new(
+        x.clamp(min_x, max_x).round() as i32,
+        y.clamp(min_y, max_y).round() as i32,
+    )
+}
+
+fn emit_tray_status(app: &tauri::AppHandle, display: &TrayDisplayState) {
+    let _ = app.emit_to(
+        TRAY_STATUS_WINDOW_LABEL,
+        "tray-status-updated",
+        tray_status_payload(display),
+    );
+}
+
 fn apply_tray_display(app: &tauri::AppHandle, display: &TrayDisplayState) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
 
-    let title = display
-        .remaining_percent
-        .map(|percent| format!("{percent}%"))
-        .unwrap_or_else(|| "--%".to_string());
-
-    let _ = tray.set_title(Some(title));
+    #[cfg(not(target_os = "windows"))]
+    {
+        let title = display
+            .remaining_percent
+            .map(|percent| format!("{percent}%"))
+            .unwrap_or_else(|| "--%".to_string());
+        let _ = tray.set_title(Some(title));
+    }
     let _ = tray.set_tooltip(Some(tray_tooltip(display)));
+    emit_tray_status(app, display);
 }
 
-fn update_tray_usage(app: &tauri::AppHandle, provider: &str, stats: &Stats) {
+fn sync_tray_settings(app: &tauri::AppHandle, settings: &Settings) {
     let Some(state) = app.try_state::<TrayUiState>() else {
         return;
     };
-    let remaining = tray_remaining_percent(stats.rate_limits.as_ref());
-    let mut display = state
-        .display
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !display.update_usage(provider, remaining) {
-        return;
-    }
+    let (display, auto_refresh_changed) = {
+        let mut display = state
+            .display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let provider_changed = display.active_provider != settings.active_provider;
+        let auto_refresh_changed = display.auto_refresh_enabled != settings.auto_refresh_enabled
+            || display.auto_refresh_minutes != settings.auto_refresh_minutes;
+        if provider_changed {
+            display.active_provider = settings.active_provider.clone();
+            display.remaining_percent = None;
+            display.refresh_failed = false;
+            display.latest_refresh_request_id =
+                display.latest_refresh_request_id.wrapping_add(1).max(1);
+            display.is_refreshing = false;
+            display.pending_refresh_request_id = None;
+        }
+        display.theme = settings.theme.clone();
+        display.accent_color = settings.accent_color.clone();
+        display.auto_refresh_enabled = settings.auto_refresh_enabled;
+        display.auto_refresh_minutes = settings.auto_refresh_minutes;
+        (display.clone(), auto_refresh_changed)
+    };
     apply_tray_display(app, &display);
+    if auto_refresh_changed {
+        state.auto_refresh_notify.notify_one();
+    }
 }
 
-fn set_tray_active_provider(app: &tauri::AppHandle, provider: &str) {
+fn begin_external_tray_refresh(app: &tauri::AppHandle, provider: &str) -> Option<u64> {
+    let state = app.try_state::<TrayUiState>()?;
+    let display = {
+        let mut display = state
+            .display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if display.active_provider != provider {
+            return None;
+        }
+        let request_id = display.next_refresh_request();
+        display.pending_refresh_request_id = None;
+        (request_id, display.clone())
+    };
+    apply_tray_display(app, &display.1);
+    Some(display.0)
+}
+
+fn complete_external_tray_refresh(
+    app: &tauri::AppHandle,
+    request_id: u64,
+    provider: &str,
+    result: Result<&Stats, &str>,
+) {
     let Some(state) = app.try_state::<TrayUiState>() else {
         return;
     };
-    let mut display = state
-        .display
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if display.active_provider == provider {
-        return;
-    }
-    display.active_provider = provider.to_string();
-    display.remaining_percent = None;
+    let display = {
+        let mut display = state
+            .display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if display.latest_refresh_request_id != request_id || display.active_provider != provider {
+            return;
+        }
+        display.is_refreshing = false;
+        match result {
+            Ok(stats) => {
+                display.update_usage(provider, tray_remaining_percent(stats.rate_limits.as_ref()));
+            }
+            Err(_) => display.refresh_failed = true,
+        }
+        display.clone()
+    };
     apply_tray_display(app, &display);
 }
 
-async fn refresh_active_tray_usage(app: tauri::AppHandle) {
-    let result = tauri::async_runtime::spawn_blocking(|| {
-        let settings = load_settings();
-        let provider = settings.active_provider.clone();
-        let stats = read_stats_for_provider(&settings, &provider)?;
-        Ok::<_, String>((provider, stats))
-    })
-    .await;
-
-    if let Ok(Ok((provider, stats))) = result {
-        update_tray_usage(&app, &provider, &stats);
+fn request_tray_refresh(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<TrayUiState>() else {
+        return;
+    };
+    let (request_id, should_start, display) = {
+        let mut display = state
+            .display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request_id = display.next_refresh_request();
+        let should_start = if display.refresh_in_flight {
+            display.pending_refresh_request_id = Some(request_id);
+            false
+        } else {
+            display.refresh_in_flight = true;
+            true
+        };
+        (request_id, should_start, display.clone())
+    };
+    apply_tray_display(app, &display);
+    if should_start {
+        tauri::async_runtime::spawn(refresh_active_tray_usage(app.clone(), request_id));
     }
+}
+
+async fn refresh_active_tray_usage(app: tauri::AppHandle, mut request_id: u64) {
+    loop {
+        let Some(state) = app.try_state::<TrayUiState>() else {
+            return;
+        };
+        let scan_lock = state.stats_scan_lock.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _scan = scan_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let settings = load_settings();
+            let provider = settings.active_provider.clone();
+            let stats = read_stats_for_provider(&settings, &provider)?;
+            Ok::<_, String>((provider, stats))
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+
+        let Some(state) = app.try_state::<TrayUiState>() else {
+            return;
+        };
+        let (next_request_id, updated_display) = {
+            let mut display = state
+                .display
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let is_latest = display.latest_refresh_request_id == request_id;
+            let mut updated_display = None;
+
+            if let Some(pending_request_id) = display.pending_refresh_request_id.take() {
+                (Some(pending_request_id), updated_display)
+            } else {
+                display.refresh_in_flight = false;
+                if is_latest {
+                    display.is_refreshing = false;
+                    match &result {
+                        Ok((provider, stats)) if display.active_provider == *provider => {
+                            display.update_usage(
+                                provider,
+                                tray_remaining_percent(stats.rate_limits.as_ref()),
+                            );
+                        }
+                        _ => display.refresh_failed = true,
+                    }
+                    updated_display = Some(display.clone());
+                }
+                (None, updated_display)
+            }
+        };
+
+        if let Some(display) = updated_display {
+            apply_tray_display(&app, &display);
+        }
+        if let Some(next_request_id) = next_request_id {
+            request_id = next_request_id;
+        } else {
+            break;
+        }
+    }
+}
+
+fn tray_auto_refresh_delay(settings: &Settings) -> Option<std::time::Duration> {
+    if !settings.auto_refresh_enabled {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(
+        u64::from(settings.auto_refresh_minutes) * 60,
+    ))
 }
 
 fn start_tray_auto_refresh(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(
-                TRAY_REFRESH_INTERVAL_SECONDS,
-            ))
-            .await;
-            refresh_active_tray_usage(app.clone()).await;
+            let Some(state) = app.try_state::<TrayUiState>() else {
+                return;
+            };
+            let notify = state.auto_refresh_notify.clone();
+            match tray_auto_refresh_delay(&load_settings()) {
+                Some(delay) => {
+                    if tokio::time::timeout(delay, notify.notified())
+                        .await
+                        .is_err()
+                    {
+                        request_tray_refresh(&app);
+                    }
+                }
+                None => notify.notified().await,
+            }
         }
     });
 }
@@ -702,6 +1025,176 @@ fn show_main_window(app: &tauri::AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[tauri::command]
+fn get_tray_status(app: tauri::AppHandle) -> Result<TrayStatusPayload, String> {
+    let state = app
+        .try_state::<TrayUiState>()
+        .ok_or_else(|| "tray state is not initialized".to_string())?;
+    let display = state
+        .display
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(tray_status_payload(&display))
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(TRAY_STATUS_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+    show_main_window(&app);
+}
+
+#[cfg(target_os = "windows")]
+fn toggle_tray_status_window(
+    app: &tauri::AppHandle,
+    tray_position: PhysicalPosition<f64>,
+    tray_size: PhysicalSize<u32>,
+) {
+    let Some(window) = app.get_webview_window(TRAY_STATUS_WINDOW_LABEL) else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+
+    let tray_center_x = tray_position.x + f64::from(tray_size.width) / 2.0;
+    let tray_center_y = tray_position.y + f64::from(tray_size.height) / 2.0;
+    if let Ok(Some(monitor)) = app.monitor_from_point(tray_center_x, tray_center_y) {
+        let window_size = window
+            .outer_size()
+            .unwrap_or_else(|_| PhysicalSize::new(320, 156));
+        let position = tray_status_window_position(
+            tray_position,
+            tray_size,
+            window_size,
+            *monitor.position(),
+            *monitor.size(),
+        );
+        let _ = window.set_position(position);
+    }
+
+    if let Some(state) = app.try_state::<TrayUiState>() {
+        let display = state
+            .display
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        emit_tray_status(app, &display);
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+    request_tray_refresh(app);
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_icon_size(base_size: u32, scale_factor: f64) -> u32 {
+    const SIZES: [u32; 15] = [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128];
+    let target = (f64::from(base_size) * scale_factor.clamp(1.0, 4.0)).round() as u32;
+
+    SIZES
+        .into_iter()
+        .min_by_key(|size| size.abs_diff(target))
+        .unwrap_or(base_size)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_icon(size: u32) -> Result<tauri::image::Image<'static>, Box<dyn std::error::Error>> {
+    let bytes: &'static [u8] = match size {
+        20 => include_bytes!("../../build/icons/20x20.png"),
+        24 => include_bytes!("../../build/icons/24x24.png"),
+        28 => include_bytes!("../../build/icons/28x28.png"),
+        32 => include_bytes!("../../build/icons/32x32.png"),
+        36 => include_bytes!("../../build/icons/36x36.png"),
+        40 => include_bytes!("../../build/icons/40x40.png"),
+        48 => include_bytes!("../../build/icons/48x48.png"),
+        56 => include_bytes!("../../build/icons/56x56.png"),
+        64 => include_bytes!("../../build/icons/64x64.png"),
+        72 => include_bytes!("../../build/icons/72x72.png"),
+        80 => include_bytes!("../../build/icons/80x80.png"),
+        96 => include_bytes!("../../build/icons/96x96.png"),
+        112 => include_bytes!("../../build/icons/112x112.png"),
+        128 => include_bytes!("../../build/icons/128x128.png"),
+        _ => include_bytes!("../../build/icons/16x16.png"),
+    };
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info()?;
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let output = reader.next_frame(&mut rgba)?;
+    if output.color_type != png::ColorType::Rgba || output.bit_depth != png::BitDepth::Eight {
+        return Err("Windows icon must be an 8-bit RGBA PNG".into());
+    }
+    rgba.truncate(output.buffer_size());
+
+    Ok(tauri::image::Image::new_owned(
+        rgba,
+        output.width,
+        output.height,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_taskbar_icon(
+    window: &tauri::WebviewWindow,
+    image: &tauri::image::Image<'_>,
+) -> Result<isize, Box<dyn std::error::Error>> {
+    let mut bgra = image.rgba().to_vec();
+    let mut and_mask = Vec::with_capacity(bgra.len() / 4);
+    for pixel in bgra.chunks_exact_mut(4) {
+        and_mask.push(pixel[3].wrapping_sub(u8::MAX));
+        pixel.swap(0, 2);
+    }
+
+    let icon = unsafe {
+        CreateIcon(
+            None,
+            image.width() as i32,
+            image.height() as i32,
+            1,
+            32,
+            and_mask.as_ptr(),
+            bgra.as_ptr(),
+        )
+    }?;
+    let hwnd = window.hwnd()?;
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(icon.0 as isize)),
+        );
+    }
+
+    Ok(icon.0 as isize)
+}
+
+#[cfg(target_os = "windows")]
+fn refresh_windows_window_icons(
+    window: &tauri::WebviewWindow,
+    scale_factor: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_icon(windows_icon(windows_icon_size(16, scale_factor))?)?;
+    let taskbar_icon = windows_icon(windows_icon_size(32, scale_factor))?;
+    let taskbar_icon = set_windows_taskbar_icon(window, &taskbar_icon)?;
+    let Some(state) = window.app_handle().try_state::<WindowsTaskbarIcon>() else {
+        let _ = unsafe { DestroyIcon(HICON(taskbar_icon as _)) };
+        return Err("Windows taskbar icon is not initialized".into());
+    };
+    state.replace(taskbar_icon);
+
+    if let Ok(Some(monitor)) = window.app_handle().primary_monitor() {
+        if let Some(tray) = window.app_handle().tray_by_id(TRAY_ID) {
+            tray.set_icon(Some(windows_icon(windows_icon_size(
+                16,
+                monitor.scale_factor(),
+            ))?))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -783,14 +1276,27 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
+            if let TrayIconEvent::Click {
+                rect,
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                #[cfg(target_os = "windows")]
+                {
+                    let scale_factor = tray
+                        .app_handle()
+                        .get_webview_window(TRAY_STATUS_WINDOW_LABEL)
+                        .and_then(|window| window.scale_factor().ok())
+                        .unwrap_or(1.0);
+                    toggle_tray_status_window(
+                        tray.app_handle(),
+                        rect.position.to_physical(scale_factor),
+                        rect.size.to_physical(scale_factor),
+                    );
                 }
-            ) {
+                #[cfg(not(target_os = "windows"))]
                 show_main_window(tray.app_handle());
             }
         });
@@ -799,19 +1305,47 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     {
         tray = tray.icon(tray_template_icon()).icon_as_template(true);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let tray_scale_factor = app
+            .primary_monitor()?
+            .map(|monitor| monitor.scale_factor())
+            .unwrap_or(1.0);
+        tray = tray.icon(windows_icon(windows_icon_size(16, tray_scale_factor))?);
+        if let Some(window) = app.get_webview_window("main") {
+            let window_scale_factor = window.scale_factor().unwrap_or(tray_scale_factor);
+            window.set_icon(windows_icon(windows_icon_size(16, window_scale_factor))?)?;
+            let taskbar_icon = windows_icon(windows_icon_size(32, window_scale_factor))?;
+            let taskbar_icon = set_windows_taskbar_icon(&window, &taskbar_icon)?;
+            if !app.manage(WindowsTaskbarIcon(Mutex::new(taskbar_icon))) {
+                return Err("Windows taskbar icon is already initialized".into());
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
     if let Some(icon) = app.default_window_icon().cloned() {
         tray = tray.icon(icon);
     }
     tray.build(app)?;
     let display = TrayDisplayState {
         language,
-        active_provider: settings.active_provider,
+        active_provider: settings.active_provider.clone(),
         remaining_percent: None,
+        theme: settings.theme,
+        accent_color: settings.accent_color,
+        auto_refresh_enabled: settings.auto_refresh_enabled,
+        auto_refresh_minutes: settings.auto_refresh_minutes,
+        is_refreshing: false,
+        refresh_failed: false,
+        refresh_in_flight: false,
+        pending_refresh_request_id: None,
+        latest_refresh_request_id: 0,
     };
     let initial_display = display.clone();
     if !app.manage(TrayUiState {
         display: Mutex::new(display),
+        auto_refresh_notify: Arc::new(tokio::sync::Notify::new()),
+        stats_scan_lock: Arc::new(Mutex::new(())),
         open_item: open,
         quit_item: quit,
     }) {
@@ -855,21 +1389,39 @@ fn get_settings() -> Settings {
 fn update_settings(app: tauri::AppHandle, settings: Settings) -> Result<Settings, String> {
     let settings = normalize_settings(settings);
     save_settings(&settings)?;
-    set_tray_active_provider(&app, &settings.active_provider);
+    sync_tray_settings(&app, &settings);
     Ok(settings)
 }
 
 #[tauri::command]
 async fn get_stats(app: tauri::AppHandle, provider: Option<String>) -> Result<Stats, String> {
-    let (provider, stats) = tauri::async_runtime::spawn_blocking(move || {
+    let task_app = app.clone();
+    let scan_lock = app
+        .try_state::<TrayUiState>()
+        .ok_or_else(|| "tray state is not initialized".to_string())?
+        .stats_scan_lock
+        .clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let _scan = scan_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let settings = load_settings();
         let provider = provider.unwrap_or_else(|| settings.active_provider.clone());
-        let stats = read_stats_for_provider(&settings, &provider)?;
-        Ok::<_, String>((provider, stats))
+        let request_id = begin_external_tray_refresh(&task_app, &provider);
+        let result = read_stats_for_provider(&settings, &provider);
+        if let Some(request_id) = request_id {
+            complete_external_tray_refresh(
+                &task_app,
+                request_id,
+                &provider,
+                result.as_ref().map_err(String::as_str),
+            );
+        }
+        result.map(|stats| (provider, stats))
     })
     .await
-    .map_err(|error| error.to_string())??;
-    update_tray_usage(&app, &provider, &stats);
+    .map_err(|error| error.to_string())?;
+    let (_, stats) = result?;
     Ok(stats)
 }
 
@@ -899,7 +1451,16 @@ async fn choose_home(
     };
 
     let folder = folder.to_string_lossy().to_string();
+    let task_app = app.clone();
+    let scan_lock = app
+        .try_state::<TrayUiState>()
+        .ok_or_else(|| "tray state is not initialized".to_string())?
+        .stats_scan_lock
+        .clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _scan = scan_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut settings = load_settings();
         settings.active_provider = provider.clone();
         match provider.as_str() {
@@ -911,19 +1472,23 @@ async fn choose_home(
         }
         settings = normalize_settings(settings);
         save_settings(&settings)?;
-        let stats = read_stats_for_provider(&settings, &provider)?;
+        sync_tray_settings(&task_app, &settings);
+        let request_id = begin_external_tray_refresh(&task_app, &provider);
+        let stats_result = read_stats_for_provider(&settings, &provider);
+        if let Some(request_id) = request_id {
+            complete_external_tray_refresh(
+                &task_app,
+                request_id,
+                &provider,
+                stats_result.as_ref().map_err(String::as_str),
+            );
+        }
+        let stats = stats_result?;
 
         Ok::<_, String>(Some(ChooseHomeResult { settings, stats }))
     })
     .await
     .map_err(|error| error.to_string())??;
-    if let Some(result) = &result {
-        let active_provider = load_settings().active_provider;
-        if result.settings.active_provider == active_provider {
-            set_tray_active_provider(&app, &active_provider);
-            update_tray_usage(&app, &active_provider, &result.stats);
-        }
-    }
     Ok(result)
 }
 
@@ -4478,8 +5043,30 @@ fn main() {
     let app = builder
         .setup(setup_tray)
         .on_window_event(|window, event| {
+            if window.label() == TRAY_STATUS_WINDOW_LABEL {
+                match event {
+                    tauri::WindowEvent::Focused(false) => {
+                        let _ = window.hide();
+                    }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             if window.label() != "main" {
                 return;
+            }
+            #[cfg(target_os = "windows")]
+            if let tauri::WindowEvent::ScaleFactorChanged { scale_factor, .. } = event {
+                if let Some(webview_window) = window.app_handle().get_webview_window("main") {
+                    if let Err(error) = refresh_windows_window_icons(&webview_window, *scale_factor)
+                    {
+                        eprintln!("failed to refresh Windows window icons: {error}");
+                    }
+                }
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -4490,6 +5077,8 @@ fn main() {
             get_settings,
             update_settings,
             sync_tray_language,
+            get_tray_status,
+            open_main_window,
             get_stats,
             choose_home,
             start_window_drag,
@@ -4534,6 +5123,23 @@ mod tests {
         }
     }
 
+    fn test_tray_display() -> TrayDisplayState {
+        TrayDisplayState {
+            language: TrayLanguage::Zh,
+            active_provider: "codex".to_string(),
+            remaining_percent: Some(50),
+            theme: "system".to_string(),
+            accent_color: "blue".to_string(),
+            auto_refresh_enabled: false,
+            auto_refresh_minutes: 30,
+            is_refreshing: false,
+            refresh_failed: false,
+            refresh_in_flight: false,
+            pending_refresh_request_id: None,
+            latest_refresh_request_id: 0,
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn tray_template_icon_is_square_with_transparent_background() {
@@ -4545,6 +5151,69 @@ mod tests {
         assert!(alpha.clone().any(|value| value == 0));
         assert!(alpha.clone().any(|value| value == u8::MAX));
         assert_eq!(icon.rgba()[3], 0);
+    }
+
+    #[test]
+    fn tray_status_payload_follows_selected_language() {
+        let mut display = test_tray_display();
+        display.remaining_percent = Some(98);
+
+        let payload = tray_status_payload(&display);
+        assert_eq!(payload.provider_label, "Codex");
+        assert_eq!(payload.remaining_percent, Some(98));
+        assert_eq!(payload.usage_label, "剩余用量");
+        assert_eq!(payload.open_label, "打开详情");
+        assert_eq!(payload.status_label, "自动更新已关闭");
+        assert_eq!(payload.theme, "system");
+
+        display.language = TrayLanguage::En;
+        display.auto_refresh_enabled = true;
+        display.auto_refresh_minutes = 12;
+        let payload = tray_status_payload(&display);
+        assert_eq!(payload.usage_label, "Remaining usage");
+        assert_eq!(payload.open_label, "Open details");
+        assert_eq!(payload.status_label, "Updates every 12 min");
+        assert_eq!(payload.language, "en");
+    }
+
+    #[test]
+    fn tray_status_window_stays_inside_bottom_taskbar_monitor() {
+        let position = tray_status_window_position(
+            PhysicalPosition::new(1800.0, 1040.0),
+            PhysicalSize::new(24, 24),
+            PhysicalSize::new(320, 156),
+            PhysicalPosition::new(0, 0),
+            PhysicalSize::new(1920, 1080),
+        );
+
+        assert_eq!(position, PhysicalPosition::new(1592, 876));
+    }
+
+    #[test]
+    fn tray_status_window_has_default_capability() {
+        let capability: Value = serde_json::from_str(include_str!("../capabilities/default.json"))
+            .expect("default capability should be valid JSON");
+        let windows = capability["windows"]
+            .as_array()
+            .expect("default capability should list windows");
+
+        assert!(windows
+            .iter()
+            .any(|window| window.as_str() == Some(TRAY_STATUS_WINDOW_LABEL)));
+    }
+
+    #[test]
+    fn windows_icons_match_common_dpi_scales() {
+        assert_eq!(windows_icon_size(16, 1.0), 16);
+        assert_eq!(windows_icon_size(16, 1.25), 20);
+        assert_eq!(windows_icon_size(16, 1.5), 24);
+        assert_eq!(windows_icon_size(16, 1.75), 28);
+        assert_eq!(windows_icon_size(16, 2.0), 32);
+        assert_eq!(windows_icon_size(32, 1.0), 32);
+        assert_eq!(windows_icon_size(32, 1.25), 40);
+        assert_eq!(windows_icon_size(32, 1.5), 48);
+        assert_eq!(windows_icon_size(32, 1.75), 56);
+        assert_eq!(windows_icon_size(32, 2.0), 64);
     }
 
     #[test]
@@ -4577,11 +5246,7 @@ mod tests {
 
     #[test]
     fn tray_display_rejects_usage_from_inactive_provider() {
-        let mut display = TrayDisplayState {
-            language: TrayLanguage::Zh,
-            active_provider: "codex".to_string(),
-            remaining_percent: Some(50),
-        };
+        let mut display = test_tray_display();
 
         assert!(!display.update_usage("claude", Some(90)));
         assert_eq!(display.remaining_percent, Some(50));
@@ -4602,11 +5267,8 @@ mod tests {
             ("Open AI Usage", "Quit")
         );
 
-        let mut display = TrayDisplayState {
-            language: TrayLanguage::Zh,
-            active_provider: "codex".to_string(),
-            remaining_percent: Some(47),
-        };
+        let mut display = test_tray_display();
+        display.remaining_percent = Some(47);
         assert_eq!(tray_tooltip(&display), "AI Usage · Codex · 剩余 47%");
 
         display.language = TrayLanguage::En;
@@ -4614,8 +5276,30 @@ mod tests {
     }
 
     #[test]
-    fn tray_refresh_interval_is_five_minutes() {
-        assert_eq!(TRAY_REFRESH_INTERVAL_SECONDS, 300);
+    fn tray_auto_refresh_delay_follows_settings() {
+        let mut settings = default_settings();
+        assert_eq!(tray_auto_refresh_delay(&settings), None);
+
+        settings.auto_refresh_enabled = true;
+        settings.auto_refresh_minutes = 12;
+        assert_eq!(
+            tray_auto_refresh_delay(&settings),
+            Some(std::time::Duration::from_secs(12 * 60))
+        );
+    }
+
+    #[test]
+    fn tray_status_payload_distinguishes_refreshing_and_stale_data() {
+        let mut display = test_tray_display();
+        display.is_refreshing = true;
+        assert_eq!(tray_status_payload(&display).status_label, "正在更新...");
+
+        display.is_refreshing = false;
+        display.refresh_failed = true;
+        assert_eq!(
+            tray_status_payload(&display).status_label,
+            "更新失败，显示上次数据"
+        );
     }
 
     #[test]

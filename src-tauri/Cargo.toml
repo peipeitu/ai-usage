@@ -20,9 +20,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 time = "=0.3.53"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["sync", "time"] }
 walkdir = "2"
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
 url = "2"
+
+[target.'cfg(windows)'.dependencies]
+png = "0.17"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
