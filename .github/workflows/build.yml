@@ -31,8 +31,35 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HAS_UPDATER_SIGNING: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check release configuration
+        run: npm run release:check
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+
+      - name: Require updater signing for tagged releases
+        if: ${{ startsWith(github.ref, 'refs/tags/') && env.HAS_UPDATER_SIGNING != 'true' }}
+        run: |
+          echo "::error::Tagged releases require AI_USAGE_UPDATER_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY."
+          exit 1
+
   windows:
     name: Windows
+    needs: preflight
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'windows' || inputs.platform == 'all' }}
     runs-on: windows-latest
     timeout-minutes: 30
@@ -74,7 +101,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:win:unsigned
 
       - name: Upload artifact
@@ -90,6 +117,7 @@ jobs:
 
   linux:
     name: Linux
+    needs: preflight
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'linux' || inputs.platform == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -140,7 +168,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:linux:unsigned
 
       - name: Upload artifact
@@ -165,8 +193,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-    env:
-      HAS_UPDATER_SIGNING: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -182,7 +208,6 @@ jobs:
           path: release-artifacts
 
       - name: Generate updater manifest
-        if: ${{ env.HAS_UPDATER_SIGNING == 'true' }}
         run: node scripts/write-latest-json.js --artifacts release-artifacts --output release-artifacts/latest.json --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
 
       - name: Upload release assets
@@ -199,3 +224,6 @@ jobs:
           gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Verify updater release
+        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"

@@ -166,7 +166,7 @@ Automatic updates are enabled only for Windows and Linux release builds. macOS i
 Generate updater signing keys once:
 
 ```sh
-npm run tauri signer generate -- -w ~/.tauri/ai-usage.key
+npx tauri signer generate -w ~/.tauri/ai-usage.key
 ```
 
 Keep the private key secret. Build Windows or Linux releases with the public key embedded and the private key available for artifact signing:
@@ -185,7 +185,15 @@ $env:TAURI_SIGNING_PRIVATE_KEY="C:\Users\you\.tauri\ai-usage.key"
 npm run package:win
 ```
 
-The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Tagged GitHub Actions releases generate and upload this updater manifest automatically when updater signing secrets are configured.
+The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Tagged GitHub Actions releases require updater signing and always generate and upload this manifest.
+
+Tagged releases require these GitHub Actions repository secrets:
+
+- `AI_USAGE_UPDATER_PUBLIC_KEY`: the complete contents of `ai-usage.key.pub`.
+- `TAURI_SIGNING_PRIVATE_KEY`: the complete contents of `ai-usage.key`, not a local file path.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the private-key password when the key is encrypted; omit it for an unencrypted key.
+
+Tagged builds fail before packaging when the public or private key is missing. Unsigned packages are available only through a manual `workflow_dispatch` build. After publishing, CI verifies the updater manifest, both download URLs, and both uploaded signatures.
 
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 

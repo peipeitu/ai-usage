@@ -37,8 +37,13 @@ function signatureFor(file) {
   return fs.readFileSync(signaturePath, "utf8").trim();
 }
 
+function releaseAssetName(file) {
+  // GitHub replaces whitespace with periods when it stores release asset names.
+  return path.basename(file).replace(/\s+/g, ".");
+}
+
 function assetUrl(repo, tag, file) {
-  return `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(path.basename(file))}`;
+  return `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(releaseAssetName(file))}`;
 }
 
 const artifactsDir = path.resolve(argValue("--artifacts", path.join(root, "release-artifacts")));
