@@ -86,6 +86,14 @@ function assertReleaseNotOlder(tag, latestTag) {
   }
 }
 
+function assertReleaseIsLatest(tag, latestTag) {
+  if (!tag || !latestTag || tag !== latestTag) {
+    throw new Error(
+      `Release repair target ${tag || "<missing>"} must match latest release ${latestTag || "<missing>"}.`,
+    );
+  }
+}
+
 function releaseVersions(root) {
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const packageLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
@@ -105,7 +113,7 @@ function releaseVersions(root) {
   };
 }
 
-function checkRelease(root, tag = "", latestTag = "") {
+function checkRelease(root, tag = "", latestTag = "", requireLatest = false) {
   const versions = releaseVersions(root);
   const entries = Object.entries(versions);
   const missing = entries.filter(([, version]) => !version).map(([file]) => file);
@@ -129,6 +137,9 @@ function checkRelease(root, tag = "", latestTag = "") {
     throw new Error(`Release tag ${tag} does not match version v${expectedVersion}.`);
   }
   assertReleaseNotOlder(tag, latestTag);
+  if (requireLatest) {
+    assertReleaseIsLatest(tag, latestTag);
+  }
 
   return expectedVersion;
 }
@@ -137,7 +148,8 @@ function main() {
   const root = path.resolve(argValue("--root", path.join(__dirname, "..")));
   const tag = argValue("--tag", process.env.RELEASE_TAG || "").trim();
   const latestTag = argValue("--latest-tag", process.env.LATEST_RELEASE_TAG || "").trim();
-  const version = checkRelease(root, tag, latestTag);
+  const requireLatest = process.argv.includes("--require-latest");
+  const version = checkRelease(root, tag, latestTag, requireLatest);
   console.log(`Release configuration is synchronized at ${version}${tag ? ` (${tag})` : ""}.`);
 }
 
@@ -151,6 +163,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertReleaseIsLatest,
   assertReleaseNotOlder,
   checkRelease,
   compareSemanticVersions,

@@ -3,23 +3,34 @@ const test = require("node:test");
 
 const { validateManifest, verifyUpdaterRelease } = require("../scripts/verify-updater-release.js");
 
+const publicKeyText = `untrusted comment: minisign public key E7620F1842B4E81F
+RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3`;
+const signatureText = `untrusted comment: signature from minisign secret key
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=
+trusted comment: timestamp:1556193335\tfile:test
+y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==`;
+const encodedPublicKey = Buffer.from(publicKeyText).toString("base64");
+const encodedSignature = Buffer.from(signatureText).toString("base64");
+const signedArtifact = Buffer.from("test");
+
 function manifestFixture() {
   return {
     version: "1.2.3",
     platforms: {
       "windows-x86_64": {
-        signature: "windows signature",
+        signature: encodedSignature,
         url: "https://github.com/owner/repo/releases/download/v1.2.3/AI.Usage_1.2.3_x64-setup.exe",
       },
       "linux-x86_64": {
-        signature: "linux signature",
+        signature: encodedSignature,
         url: "https://github.com/owner/repo/releases/download/v1.2.3/AI.Usage_1.2.3_amd64.AppImage",
       },
     },
   };
 }
 
-function mockResponse({ status = 200, json, text = "" } = {}) {
+function mockResponse({ status = 200, json, text = "", data = Buffer.alloc(0) } = {}) {
+  const buffer = Buffer.from(data);
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -28,6 +39,9 @@ function mockResponse({ status = 200, json, text = "" } = {}) {
     },
     async text() {
       return text;
+    },
+    async arrayBuffer() {
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     },
   };
 }
@@ -43,7 +57,7 @@ test("manifest validation rejects asset names that GitHub normalizes", () => {
   );
 });
 
-test("release verification checks assets and exact signature contents", async () => {
+test("release verification downloads and cryptographically verifies released assets", async () => {
   const manifest = manifestFixture();
   const requested = [];
   const fetchImpl = async (url, init = {}) => {
@@ -52,14 +66,14 @@ test("release verification checks assets and exact signature contents", async ()
     if (url.endsWith("/latest.json")) {
       return mockResponse({ json: manifest });
     }
-    if (init.method === "HEAD") {
-      return mockResponse({ status: 302 });
-    }
     if (url.endsWith(".exe.sig")) {
-      return mockResponse({ text: "windows signature\n" });
+      return mockResponse({ text: `${encodedSignature}\n` });
     }
     if (url.endsWith(".AppImage.sig")) {
-      return mockResponse({ text: "linux signature\n" });
+      return mockResponse({ text: `${encodedSignature}\n` });
+    }
+    if (Object.values(manifest.platforms).some((entry) => entry.url === url)) {
+      return mockResponse({ data: signedArtifact });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
@@ -67,6 +81,7 @@ test("release verification checks assets and exact signature contents", async ()
   await verifyUpdaterRelease({
     repo: "owner/repo",
     tag: "v1.2.3",
+    encodedPublicKey,
     attempts: 1,
     delayMs: 0,
     timeoutMs: 1000,
@@ -75,12 +90,15 @@ test("release verification checks assets and exact signature contents", async ()
   });
 
   assert.deepEqual(
-    requested.filter(([, method]) => method === "HEAD").map(([url]) => url),
+    requested
+      .filter(([url]) => Object.values(manifest.platforms).some((entry) => entry.url === url))
+      .map(([url]) => url),
     [
       manifest.platforms["windows-x86_64"].url,
       manifest.platforms["linux-x86_64"].url,
     ],
   );
+  assert.equal(requested.some(([, method]) => method === "HEAD"), false);
   assert.deepEqual(
     requested.filter(([url]) => url.endsWith("/latest.json")).map(([url]) => url),
     [
@@ -94,14 +112,15 @@ test("release verification rejects a signature mismatch", async () => {
   const manifest = manifestFixture();
   const fetchImpl = async (url, init = {}) => {
     if (url.endsWith("/latest.json")) return mockResponse({ json: manifest });
-    if (init.method === "HEAD") return mockResponse({ status: 302 });
-    return mockResponse({ text: "wrong signature" });
+    if (url.endsWith(".sig")) return mockResponse({ text: "wrong signature" });
+    return mockResponse({ data: signedArtifact });
   };
 
   await assert.rejects(
     verifyUpdaterRelease({
       repo: "owner/repo",
       tag: "v1.2.3",
+      encodedPublicKey,
       attempts: 1,
       delayMs: 0,
       timeoutMs: 1000,
@@ -124,19 +143,20 @@ test("release verification retries content mismatches and refetches manifests", 
     if (url.includes("/releases/latest/") && url.endsWith("/latest.json")) {
       return mockResponse({ json: manifest });
     }
-    if (init.method === "HEAD") return mockResponse({ status: 302 });
     if (url.endsWith(".exe.sig")) {
       windowsSignatureReads += 1;
       return mockResponse({
-        text: windowsSignatureReads === 1 ? "stale signature" : "windows signature",
+        text: windowsSignatureReads === 1 ? "stale signature" : encodedSignature,
       });
     }
-    return mockResponse({ text: "linux signature" });
+    if (url.endsWith(".AppImage.sig")) return mockResponse({ text: encodedSignature });
+    return mockResponse({ data: signedArtifact });
   };
 
   await verifyUpdaterRelease({
     repo: "owner/repo",
     tag: "v1.2.3",
+    encodedPublicKey,
     attempts: 2,
     delayMs: 0,
     timeoutMs: 1000,
@@ -161,6 +181,7 @@ test("release verification rejects a latest alias that points to another version
     verifyUpdaterRelease({
       repo: "owner/repo",
       tag: "v1.2.3",
+      encodedPublicKey,
       attempts: 1,
       delayMs: 0,
       timeoutMs: 1000,
@@ -168,5 +189,28 @@ test("release verification rejects a latest alias that points to another version
       log() {},
     }),
     /does not match 1\.2\.3/,
+  );
+});
+
+test("release verification rejects a released artifact that does not match its signature", async () => {
+  const manifest = manifestFixture();
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/latest.json")) return mockResponse({ json: manifest });
+    if (url.endsWith(".sig")) return mockResponse({ text: encodedSignature });
+    return mockResponse({ data: Buffer.from("tampered") });
+  };
+
+  await assert.rejects(
+    verifyUpdaterRelease({
+      repo: "owner/repo",
+      tag: "v1.2.3",
+      encodedPublicKey,
+      attempts: 1,
+      delayMs: 0,
+      timeoutMs: 1000,
+      fetchImpl,
+      log() {},
+    }),
+    /released artifact verification failed/,
   );
 });

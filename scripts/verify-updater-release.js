@@ -1,3 +1,5 @@
+const { verifyUpdaterSignature } = require("./verify-updater-signatures.js");
+
 const REQUIRED_PLATFORMS = {
   "windows-x86_64": ".exe",
   "linux-x86_64": ".AppImage",
@@ -109,7 +111,7 @@ function assertLatestManifest(tagManifest, latestManifest) {
   }
 }
 
-async function verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }) {
+async function verifyUpdaterReleaseOnce({ repo, tag, encodedPublicKey, timeoutMs, fetchImpl }) {
   const requestOptions = { timeoutMs, fetchImpl };
   const tagManifestUrl = `https://github.com/${repo}/releases/download/${tag}/latest.json`;
   const tagManifestResponse = await fetchChecked(
@@ -130,15 +132,6 @@ async function verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }) {
 
   for (const platform of Object.keys(REQUIRED_PLATFORMS)) {
     const entry = tagManifest.platforms[platform];
-    await fetchChecked(
-      entry.url,
-      { method: "HEAD", redirect: "manual" },
-      {
-        ...requestOptions,
-        label: `${platform} updater asset`,
-        allowRedirect: true,
-      },
-    );
     const signatureResponse = await fetchChecked(
       `${entry.url}.sig`,
       { redirect: "follow" },
@@ -148,6 +141,20 @@ async function verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }) {
     if (releasedSignature !== entry.signature.trim()) {
       throw new Error(`${platform} signature does not match latest.json.`);
     }
+    const artifactResponse = await fetchChecked(
+      entry.url,
+      { redirect: "follow" },
+      { ...requestOptions, label: `${platform} updater asset` },
+    );
+    try {
+      verifyUpdaterSignature(
+        Buffer.from(await artifactResponse.arrayBuffer()),
+        releasedSignature,
+        encodedPublicKey,
+      );
+    } catch (error) {
+      throw new Error(`${platform} released artifact verification failed: ${error.message}`);
+    }
   }
 
   return tagManifest;
@@ -156,14 +163,18 @@ async function verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }) {
 async function verifyUpdaterRelease({
   repo,
   tag,
+  encodedPublicKey,
   attempts = 6,
   delayMs = 5000,
-  timeoutMs = 15000,
+  timeoutMs = 60000,
   fetchImpl = globalThis.fetch,
   log = console.log,
 }) {
   if (!repo || !tag) {
     throw new Error("Both --repo and --tag are required.");
+  }
+  if (typeof encodedPublicKey !== "string" || !encodedPublicKey.trim()) {
+    throw new Error("AI_USAGE_UPDATER_PUBLIC_KEY is required to verify released artifacts.");
   }
   if (typeof fetchImpl !== "function") {
     throw new Error("This command requires Node.js with fetch support.");
@@ -173,7 +184,7 @@ async function verifyUpdaterRelease({
     `Updater release ${tag}`,
     attempts,
     delayMs,
-    () => verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }),
+    () => verifyUpdaterReleaseOnce({ repo, tag, encodedPublicKey, timeoutMs, fetchImpl }),
   );
 
   for (const platform of Object.keys(REQUIRED_PLATFORMS)) {
@@ -188,9 +199,10 @@ async function main() {
   await verifyUpdaterRelease({
     repo: argValue("--repo", process.env.GITHUB_REPOSITORY || ""),
     tag: argValue("--tag", process.env.GITHUB_REF_NAME || ""),
+    encodedPublicKey: process.env.AI_USAGE_UPDATER_PUBLIC_KEY || "",
     attempts: positiveInteger(argValue("--attempts", ""), 6),
     delayMs: positiveInteger(argValue("--delay-ms", ""), 5000),
-    timeoutMs: positiveInteger(argValue("--timeout-ms", ""), 15000),
+    timeoutMs: positiveInteger(argValue("--timeout-ms", ""), 60000),
   });
 }
 

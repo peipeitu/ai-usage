@@ -38,6 +38,7 @@ on:
         type: string
 
 env:
+  REPAIR_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
   RELEASE_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.repair_release && inputs.release_tag) || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
   SOURCE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release && 'release-source' || '.' }}
 
@@ -102,7 +103,11 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.repair_release) }}
         run: |
           latest_tag=$(gh release list --limit 100 --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
-          node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          if [[ "$REPAIR_RELEASE" == "true" ]]; then
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+          else
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -324,7 +329,11 @@ jobs:
         shell: bash
         run: |
           latest_tag=$(gh release list --limit 100 --json tagName,isLatest --jq '.[] | select(.isLatest) | .tagName')
-          node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          if [[ "$REPAIR_RELEASE" == "true" ]]; then
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+          else
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          fi
 
           release_exists=false
           release_is_draft=false
@@ -346,6 +355,8 @@ jobs:
             exit 1
           fi
           echo "Existing published release is healthy; skipping asset replacement."
+        env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
 
       - name: Prepare draft release
         if: ${{ steps.release_state.outputs.should_mutate == 'true' }}
@@ -385,4 +396,5 @@ jobs:
             exit 1
           fi
         env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
           GH_TOKEN: ${{ github.token }}

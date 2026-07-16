@@ -43,8 +43,8 @@ function releaseFixture(t, versions = {}) {
   return fixture;
 }
 
-function runCheck(fixture, tag, latestTag = "") {
-  return spawnSync(process.execPath, [
+function runCheck(fixture, tag, latestTag = "", requireLatest = false) {
+  const args = [
     script,
     "--root",
     fixture,
@@ -52,7 +52,9 @@ function runCheck(fixture, tag, latestTag = "") {
     tag,
     "--latest-tag",
     latestTag,
-  ], {
+  ];
+  if (requireLatest) args.push("--require-latest");
+  return spawnSync(process.execPath, args, {
     encoding: "utf8",
   });
 }
@@ -87,6 +89,19 @@ test("release check rejects a tag older than the current latest release", (t) =>
 
 test("release check accepts a tag newer than the current latest release", (t) => {
   const result = runCheck(releaseFixture(t), "v1.2.3", "v1.2.2");
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("release repair rejects a published tag newer than the current latest release", (t) => {
+  const result = runCheck(releaseFixture(t), "v1.2.3", "v1.2.2", true);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must match latest release v1\.2\.2/);
+});
+
+test("release repair accepts the exact current latest tag", (t) => {
+  const result = runCheck(releaseFixture(t), "v1.2.3", "v1.2.3", true);
 
   assert.equal(result.status, 0, result.stderr);
 });

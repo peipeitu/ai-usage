@@ -193,7 +193,7 @@ Tagged releases require these GitHub Actions repository secrets:
 - `TAURI_SIGNING_PRIVATE_KEY`: the complete contents of `ai-usage.key`, not a local file path.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the private-key password when the key is encrypted; omit it for an unencrypted key.
 
-Tagged builds fail before packaging when the public or private key is missing. Unsigned packages are available only through a manual `workflow_dispatch` build. CI verifies both installers against the configured public key before uploading them to a draft release. After publishing, it verifies the tag-specific manifest, the client-facing `latest` manifest, both download URLs, and both uploaded signatures; a failed public verification returns the release to draft.
+Tagged builds fail before packaging when the public or private key is missing. Unsigned packages are available only through a manual `workflow_dispatch` build. CI verifies both installers against the configured public key before uploading them to a draft release. After publishing, it verifies the tag-specific manifest and client-facing `latest` manifest, downloads both released installers, and cryptographically verifies them against their uploaded signatures and the configured public key; a failed public verification returns the release to draft.
 
 A normal rerun never overwrites an existing published release: it verifies the public assets and exits successfully when they are healthy. If the current latest release is published but broken, start the current workflow from `main` and explicitly select the source tag to rebuild:
 
