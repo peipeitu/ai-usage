@@ -18,6 +18,7 @@ const themes = new Set(["light", "dark"]);
 const accents = new Set(["blue", "turquoise", "green", "purple", "red", "orange", "graphite"]);
 
 function normalizedPercent(value) {
+  if (value === null || value === undefined) return null;
   const percent = Number(value);
   if (!Number.isFinite(percent)) return null;
   return Math.min(100, Math.max(0, Math.round(percent)));

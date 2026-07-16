@@ -1257,7 +1257,37 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     let _ = (app, event);
 }
 
+#[cfg(target_os = "windows")]
+fn create_tray_status_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    if app.get_webview_window(TRAY_STATUS_WINDOW_LABEL).is_some() {
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        TRAY_STATUS_WINDOW_LABEL,
+        tauri::WebviewUrl::App("tray.html".into()),
+    )
+    .title("AI Usage Status")
+    .inner_size(320.0, 156.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .shadow(true)
+    .build()?;
+    Ok(())
+}
+
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    create_tray_status_window(app)?;
+
     let settings = load_settings();
     let language = tray_language(&settings.language);
     let (open_label, quit_label) = tray_menu_labels(language);
@@ -5206,6 +5236,19 @@ mod tests {
         assert!(windows
             .iter()
             .any(|window| window.as_str() == Some(TRAY_STATUS_WINDOW_LABEL)));
+    }
+
+    #[test]
+    fn tray_status_window_is_not_in_cross_platform_config() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("Tauri config should be valid JSON");
+        let windows = config["app"]["windows"]
+            .as_array()
+            .expect("Tauri config should list windows");
+
+        assert!(windows
+            .iter()
+            .all(|window| window["label"].as_str() != Some(TRAY_STATUS_WINDOW_LABEL)));
     }
 
     #[test]
