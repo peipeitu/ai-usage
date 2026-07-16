@@ -31,6 +31,61 @@ function cargoLockVersion(content) {
   return version;
 }
 
+function parseSemanticVersion(value) {
+  const match = value.match(
+    /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+  );
+  if (!match) {
+    throw new Error(`Invalid semantic version: ${value}.`);
+  }
+  return {
+    core: match.slice(1, 4).map(Number),
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+
+function comparePrerelease(left, right) {
+  if (!left.length && !right.length) return 0;
+  if (!left.length) return 1;
+  if (!right.length) return -1;
+
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] === undefined) return -1;
+    if (right[index] === undefined) return 1;
+    if (left[index] === right[index]) continue;
+
+    const leftNumeric = /^\d+$/.test(left[index]);
+    const rightNumeric = /^\d+$/.test(right[index]);
+    if (leftNumeric && rightNumeric) return Number(left[index]) < Number(right[index]) ? -1 : 1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return left[index] < right[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+function compareSemanticVersions(leftValue, rightValue) {
+  const left = parseSemanticVersion(leftValue);
+  const right = parseSemanticVersion(rightValue);
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) {
+      return left.core[index] < right.core[index] ? -1 : 1;
+    }
+  }
+  return comparePrerelease(left.prerelease, right.prerelease);
+}
+
+function assertReleaseNotOlder(tag, latestTag) {
+  if (!tag || !latestTag) return;
+  const comparison = compareSemanticVersions(tag, latestTag);
+  if (comparison < 0) {
+    throw new Error(`Release tag ${tag} is older than latest release ${latestTag}.`);
+  }
+  if (comparison === 0 && tag.replace(/^v/, "") !== latestTag.replace(/^v/, "")) {
+    throw new Error(`Release tag ${tag} conflicts with latest release ${latestTag}.`);
+  }
+}
+
 function releaseVersions(root) {
   const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   const packageLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
@@ -50,7 +105,7 @@ function releaseVersions(root) {
   };
 }
 
-function checkRelease(root, tag = "") {
+function checkRelease(root, tag = "", latestTag = "") {
   const versions = releaseVersions(root);
   const entries = Object.entries(versions);
   const missing = entries.filter(([, version]) => !version).map(([file]) => file);
@@ -73,6 +128,7 @@ function checkRelease(root, tag = "") {
   if (tag && tag !== `v${expectedVersion}`) {
     throw new Error(`Release tag ${tag} does not match version v${expectedVersion}.`);
   }
+  assertReleaseNotOlder(tag, latestTag);
 
   return expectedVersion;
 }
@@ -80,7 +136,8 @@ function checkRelease(root, tag = "") {
 function main() {
   const root = path.resolve(argValue("--root", path.join(__dirname, "..")));
   const tag = argValue("--tag", process.env.RELEASE_TAG || "").trim();
-  const version = checkRelease(root, tag);
+  const latestTag = argValue("--latest-tag", process.env.LATEST_RELEASE_TAG || "").trim();
+  const version = checkRelease(root, tag, latestTag);
   console.log(`Release configuration is synchronized at ${version}${tag ? ` (${tag})` : ""}.`);
 }
 
@@ -93,4 +150,9 @@ if (require.main === module) {
   }
 }
 
-module.exports = { checkRelease, releaseVersions };
+module.exports = {
+  assertReleaseNotOlder,
+  checkRelease,
+  compareSemanticVersions,
+  releaseVersions,
+};

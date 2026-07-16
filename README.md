@@ -195,6 +195,14 @@ Tagged releases require these GitHub Actions repository secrets:
 
 Tagged builds fail before packaging when the public or private key is missing. Unsigned packages are available only through a manual `workflow_dispatch` build. CI verifies both installers against the configured public key before uploading them to a draft release. After publishing, it verifies the tag-specific manifest, the client-facing `latest` manifest, both download URLs, and both uploaded signatures; a failed public verification returns the release to draft.
 
+A normal rerun never overwrites an existing published release: it verifies the public assets and exits successfully when they are healthy. If the current latest release is published but broken, start the current workflow from `main` and explicitly select the source tag to rebuild:
+
+```sh
+gh workflow run build.yml --ref main -f platform=all -f package=true -f repair_release=true -f release_tag=v0.1.6
+```
+
+Repair mode is accepted only for an existing published release. It keeps the current workflow tooling on `main` while building the application source from `release_tag`. A tag older than the current GitHub Latest release is rejected before packaging so a historical rerun cannot move the updater channel backwards.
+
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 
 ```sh

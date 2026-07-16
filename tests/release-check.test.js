@@ -5,6 +5,8 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
+const { compareSemanticVersions } = require("../scripts/check-release.js");
+
 const root = path.resolve(__dirname, "..");
 const script = path.join(root, "scripts", "check-release.js");
 
@@ -41,8 +43,16 @@ function releaseFixture(t, versions = {}) {
   return fixture;
 }
 
-function runCheck(fixture, tag) {
-  return spawnSync(process.execPath, [script, "--root", fixture, "--tag", tag], {
+function runCheck(fixture, tag, latestTag = "") {
+  return spawnSync(process.execPath, [
+    script,
+    "--root",
+    fixture,
+    "--tag",
+    tag,
+    "--latest-tag",
+    latestTag,
+  ], {
     encoding: "utf8",
   });
 }
@@ -66,4 +76,31 @@ test("release check rejects a tag that does not match the app version", (t) => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /does not match version v1\.2\.3/);
+});
+
+test("release check rejects a tag older than the current latest release", (t) => {
+  const result = runCheck(releaseFixture(t), "v1.2.3", "v1.3.0");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /older than latest release v1\.3\.0/);
+});
+
+test("release check accepts a tag newer than the current latest release", (t) => {
+  const result = runCheck(releaseFixture(t), "v1.2.3", "v1.2.2");
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("release check rejects a different tag with equal semantic precedence", (t) => {
+  const fixture = releaseFixture(t, { packageJson: "1.2.3+repair" });
+  const result = runCheck(fixture, "v1.2.3+repair", "v1.2.3+release");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /conflicts with latest release/);
+});
+
+test("semantic version comparison orders prereleases before stable versions", () => {
+  assert.equal(compareSemanticVersions("v1.2.3-beta.2", "v1.2.3-beta.10"), -1);
+  assert.equal(compareSemanticVersions("v1.2.3-rc.1", "v1.2.3"), -1);
+  assert.equal(compareSemanticVersions("v1.2.3", "v1.2.3"), 0);
 });
