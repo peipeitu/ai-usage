@@ -47,7 +47,7 @@ AI Usage is a small cross-platform Tauri desktop dashboard for local AI coding u
 - Includes settings for Codex directory, Claude Code directory, GitHub Copilot directory, Cursor directory, ChatGPT directory, theme, accent color, chart period, enabled providers, and auto-refresh interval.
 - Defaults to a 30-day chart period.
 - Auto refresh can be disabled or configured in minutes. Manual refresh resets the auto-refresh countdown.
-- No tray integration yet.
+- Shows remaining usage in the system tray, with a Windows popup for provider details and refresh status.
 
 ## Development
 
@@ -147,14 +147,14 @@ Outputs:
 Install AppImage:
 
 ```sh
-chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.5_amd64.AppImage
-./src-tauri/target/release/bundle/appimage/ai-usage_0.1.5_amd64.AppImage
+chmod +x src-tauri/target/release/bundle/appimage/ai-usage_0.1.6_amd64.AppImage
+./src-tauri/target/release/bundle/appimage/ai-usage_0.1.6_amd64.AppImage
 ```
 
 Install Debian package:
 
 ```sh
-sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.5_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/ai-usage_0.1.6_amd64.deb
 ```
 
 Package filenames include the current package version and target architecture, so adjust the examples if your generated filename differs.
@@ -190,7 +190,7 @@ The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/la
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 
 ```sh
-npm run updater:latest -- --artifacts release-artifacts --output release-artifacts/latest.json --repo peipeitu/ai-usage --tag v0.1.5
+npm run updater:latest -- --artifacts release-artifacts --output release-artifacts/latest.json --repo peipeitu/ai-usage --tag v0.1.6
 ```
 
 Linux AppImage GPG signing is optional and separate from the updater signature:

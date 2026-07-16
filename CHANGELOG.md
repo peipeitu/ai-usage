@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 - 2026-07-16
+
+- Add tray usage status with background refresh, provider-aware quota display, and synchronized language and settings behavior.
+- Add a Windows tray popup with remaining usage, refresh and stale-data states, theme and accent support, and an action to open the main window.
+- Improve Windows taskbar and tray icon rendering across common DPI scales, and keep the Windows release free of an extra console window.
+- Serialize usage scans and reject stale refresh results so concurrent updates cannot overwrite newer data or compete for history writes.
+
 ## 0.1.5 - 2026-07-09
 
 - Preserve Codex daily usage history in an AI Usage snapshot so deleted local Codex sessions no longer shrink previously observed trend totals.
