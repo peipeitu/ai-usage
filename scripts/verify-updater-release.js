@@ -61,31 +61,96 @@ function responseAvailable(response, allowRedirect = false) {
   return response.ok || (allowRedirect && response.status >= 300 && response.status < 400);
 }
 
-async function fetchWithRetry(
+async function fetchChecked(
   url,
   init,
-  { attempts, delayMs, timeoutMs, fetchImpl, label, allowRedirect = false },
+  { timeoutMs, fetchImpl, label, allowRedirect = false },
 ) {
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new Error(`${label} failed: ${error.message}`);
+  }
+  if (!responseAvailable(response, allowRedirect)) {
+    throw new Error(`${label} returned HTTP ${response.status}.`);
+  }
+  return response;
+}
+
+async function retryOperation(label, attempts, delayMs, operation) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetchImpl(url, {
-        ...init,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (responseAvailable(response, allowRedirect)) {
-        return response;
-      }
-      lastError = new Error(`${label} returned HTTP ${response.status}.`);
+      return await operation();
     } catch (error) {
-      lastError = new Error(`${label} failed: ${error.message}`);
+      lastError = error;
     }
-
     if (attempt < attempts && delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-  throw lastError;
+  throw new Error(`${label} failed after ${attempts} attempt(s): ${lastError.message}`);
+}
+
+function assertLatestManifest(tagManifest, latestManifest) {
+  for (const platform of Object.keys(REQUIRED_PLATFORMS)) {
+    const tagEntry = tagManifest.platforms[platform];
+    const latestEntry = latestManifest.platforms[platform];
+    if (
+      tagEntry.url !== latestEntry.url ||
+      tagEntry.signature.trim() !== latestEntry.signature.trim()
+    ) {
+      throw new Error(`Latest updater manifest does not match ${platform} for the release tag.`);
+    }
+  }
+}
+
+async function verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }) {
+  const requestOptions = { timeoutMs, fetchImpl };
+  const tagManifestUrl = `https://github.com/${repo}/releases/download/${tag}/latest.json`;
+  const tagManifestResponse = await fetchChecked(
+    tagManifestUrl,
+    { redirect: "follow" },
+    { ...requestOptions, label: "Tagged updater manifest" },
+  );
+  const tagManifest = validateManifest(await tagManifestResponse.json(), repo, tag);
+
+  const latestManifestUrl = `https://github.com/${repo}/releases/latest/download/latest.json`;
+  const latestManifestResponse = await fetchChecked(
+    latestManifestUrl,
+    { redirect: "follow" },
+    { ...requestOptions, label: "Latest updater manifest" },
+  );
+  const latestManifest = validateManifest(await latestManifestResponse.json(), repo, tag);
+  assertLatestManifest(tagManifest, latestManifest);
+
+  for (const platform of Object.keys(REQUIRED_PLATFORMS)) {
+    const entry = tagManifest.platforms[platform];
+    await fetchChecked(
+      entry.url,
+      { method: "HEAD", redirect: "manual" },
+      {
+        ...requestOptions,
+        label: `${platform} updater asset`,
+        allowRedirect: true,
+      },
+    );
+    const signatureResponse = await fetchChecked(
+      `${entry.url}.sig`,
+      { redirect: "follow" },
+      { ...requestOptions, label: `${platform} updater signature` },
+    );
+    const releasedSignature = (await signatureResponse.text()).trim();
+    if (releasedSignature !== entry.signature.trim()) {
+      throw new Error(`${platform} signature does not match latest.json.`);
+    }
+  }
+
+  return tagManifest;
 }
 
 async function verifyUpdaterRelease({
@@ -104,37 +169,14 @@ async function verifyUpdaterRelease({
     throw new Error("This command requires Node.js with fetch support.");
   }
 
-  const manifestUrl = `https://github.com/${repo}/releases/download/${tag}/latest.json`;
-  const manifestResponse = await fetchWithRetry(
-    manifestUrl,
-    { redirect: "follow" },
-    { attempts, delayMs, timeoutMs, fetchImpl, label: "Updater manifest" },
+  const manifest = await retryOperation(
+    `Updater release ${tag}`,
+    attempts,
+    delayMs,
+    () => verifyUpdaterReleaseOnce({ repo, tag, timeoutMs, fetchImpl }),
   );
-  const manifest = validateManifest(await manifestResponse.json(), repo, tag);
 
   for (const platform of Object.keys(REQUIRED_PLATFORMS)) {
-    const entry = manifest.platforms[platform];
-    await fetchWithRetry(
-      entry.url,
-      { method: "HEAD", redirect: "manual" },
-      {
-        attempts,
-        delayMs,
-        timeoutMs,
-        fetchImpl,
-        label: `${platform} updater asset`,
-        allowRedirect: true,
-      },
-    );
-    const signatureResponse = await fetchWithRetry(
-      `${entry.url}.sig`,
-      { redirect: "follow" },
-      { attempts, delayMs, timeoutMs, fetchImpl, label: `${platform} updater signature` },
-    );
-    const releasedSignature = (await signatureResponse.text()).trim();
-    if (releasedSignature !== entry.signature.trim()) {
-      throw new Error(`${platform} signature does not match latest.json.`);
-    }
     log(`${platform}: asset and signature verified`);
   }
 
@@ -159,4 +201,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { validateManifest, verifyUpdaterRelease };
+module.exports = { assertLatestManifest, validateManifest, verifyUpdaterRelease };

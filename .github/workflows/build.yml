@@ -207,15 +207,27 @@ jobs:
         with:
           path: release-artifacts
 
+      - name: Verify updater signatures
+        run: npm run updater:verify-signatures -- --artifacts release-artifacts
+        env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
+
       - name: Generate updater manifest
         run: node scripts/write-latest-json.js --artifacts release-artifacts --output release-artifacts/latest.json --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
 
-      - name: Upload release assets
+      - name: Prepare draft release
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release edit "${{ github.ref_name }}" --draft
+          else
+            gh release create "${{ github.ref_name }}" --draft --verify-tag --title "AI Usage ${{ github.ref_name }}" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload release assets to draft
         shell: bash
         run: |
-          gh release view "${{ github.ref_name }}" \
-            || gh release create "${{ github.ref_name }}" --title "AI Usage ${{ github.ref_name }}" --generate-notes \
-            || gh release view "${{ github.ref_name }}"
           mapfile -t assets < <(find release-artifacts -type f \( -name '*.exe' -o -name '*.sig' -o -name '*.AppImage' -o -name '*.deb' -o -name 'latest.json' \))
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No release assets found."
@@ -225,5 +237,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Verify updater release
-        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
+      - name: Publish and verify updater release
+        run: |
+          gh release edit "${{ github.ref_name }}" --draft=false --latest
+          if ! npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"; then
+            echo "::error::Published updater verification failed; returning the release to draft."
+            gh release edit "${{ github.ref_name }}" --draft
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

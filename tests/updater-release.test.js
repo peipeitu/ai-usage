@@ -81,6 +81,13 @@ test("release verification checks assets and exact signature contents", async ()
       manifest.platforms["linux-x86_64"].url,
     ],
   );
+  assert.deepEqual(
+    requested.filter(([url]) => url.endsWith("/latest.json")).map(([url]) => url),
+    [
+      "https://github.com/owner/repo/releases/download/v1.2.3/latest.json",
+      "https://github.com/owner/repo/releases/latest/download/latest.json",
+    ],
+  );
 });
 
 test("release verification rejects a signature mismatch", async () => {
@@ -102,5 +109,64 @@ test("release verification rejects a signature mismatch", async () => {
       log() {},
     }),
     /signature does not match/,
+  );
+});
+
+test("release verification retries content mismatches and refetches manifests", async () => {
+  const manifest = manifestFixture();
+  let taggedManifestReads = 0;
+  let windowsSignatureReads = 0;
+  const fetchImpl = async (url, init = {}) => {
+    if (url.includes("/releases/download/") && url.endsWith("/latest.json")) {
+      taggedManifestReads += 1;
+      return mockResponse({ json: manifest });
+    }
+    if (url.includes("/releases/latest/") && url.endsWith("/latest.json")) {
+      return mockResponse({ json: manifest });
+    }
+    if (init.method === "HEAD") return mockResponse({ status: 302 });
+    if (url.endsWith(".exe.sig")) {
+      windowsSignatureReads += 1;
+      return mockResponse({
+        text: windowsSignatureReads === 1 ? "stale signature" : "windows signature",
+      });
+    }
+    return mockResponse({ text: "linux signature" });
+  };
+
+  await verifyUpdaterRelease({
+    repo: "owner/repo",
+    tag: "v1.2.3",
+    attempts: 2,
+    delayMs: 0,
+    timeoutMs: 1000,
+    fetchImpl,
+    log() {},
+  });
+
+  assert.equal(windowsSignatureReads, 2);
+  assert.equal(taggedManifestReads, 2);
+});
+
+test("release verification rejects a latest alias that points to another version", async () => {
+  const manifest = manifestFixture();
+  const staleManifest = manifestFixture();
+  staleManifest.version = "1.2.2";
+  const fetchImpl = async (url) => {
+    if (url.includes("/releases/latest/")) return mockResponse({ json: staleManifest });
+    return mockResponse({ json: manifest });
+  };
+
+  await assert.rejects(
+    verifyUpdaterRelease({
+      repo: "owner/repo",
+      tag: "v1.2.3",
+      attempts: 1,
+      delayMs: 0,
+      timeoutMs: 1000,
+      fetchImpl,
+      log() {},
+    }),
+    /does not match 1\.2\.3/,
   );
 });
