@@ -209,7 +209,7 @@ function writeIcns(target, sizeMap) {
 }
 
 writePng(path.join(buildDir, "icon.png"), 1024);
-for (const size of [16, 24, 32, 48, 64, 128, 256, 512, 1024]) {
+for (const size of [16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 96, 112, 128, 256, 512, 1024]) {
   writePng(path.join(linuxDir, `${size}x${size}.png`), size);
 }
 

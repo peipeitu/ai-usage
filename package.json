@@ -22,7 +22,7 @@
     "start": "tauri dev",
     "icons": "node scripts/generate-icons.js",
     "updater:latest": "node scripts/write-latest-json.js",
-    "test": "node --check src/renderer/renderer.js && node --check scripts/write-updater-config.js && node --check scripts/write-latest-json.js && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test": "node --check src/renderer/renderer.js && node --check src/renderer/tray.js && node --check scripts/write-updater-config.js && node --check scripts/write-latest-json.js && node --test tests/tray.test.js && cargo test --manifest-path src-tauri/Cargo.toml",
     "fmt:check": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
     "lint": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "package:mac": "tauri build --bundles app",
