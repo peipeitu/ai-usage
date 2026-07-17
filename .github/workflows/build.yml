@@ -27,7 +27,7 @@ on:
         default: true
         type: boolean
       repair_release:
-        description: "Replace an existing published release (tag + all platforms only)"
+        description: "Repair or resume an existing release (tag + all platforms only)"
         required: true
         default: false
         type: boolean
@@ -65,8 +65,8 @@ jobs:
               echo "::error::Release repair must run from the default branch ($DEFAULT_BRANCH)."
               exit 1
             fi
-            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-              echo "::error::Release repair requires release_tag in vX.Y.Z format."
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo "::error::Release repair requires release_tag in vX.Y.Z[-prerelease][+build] format."
               exit 1
             fi
             if [[ "$RELEASE_PLATFORM" != "all" || "$PACKAGE_RELEASE" != "true" ]]; then
@@ -99,7 +99,7 @@ jobs:
       - name: Check release configuration
         run: node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG"
 
-      - name: Reject historical release tags
+      - name: Validate release ordering and repair target
         if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.repair_release) }}
         run: |
           latest_tag=""
@@ -111,23 +111,17 @@ jobs:
             fi
           fi
           if [[ "$REPAIR_RELEASE" == "true" ]]; then
-            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+            if ! release_is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'); then
+              echo "::error::Release repair requires an existing release."
+              exit 1
+            fi
+            if [[ "$release_is_draft" == "true" ]]; then
+              node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+            else
+              node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+            fi
           else
             node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Validate repair target
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
-        run: |
-          if ! release_is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'); then
-            echo "::error::Release repair requires an existing published release."
-            exit 1
-          fi
-          if [[ "$release_is_draft" == "true" ]]; then
-            echo "::error::Draft releases resume through a normal tag rerun, not repair mode."
-            exit 1
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -299,7 +293,9 @@ jobs:
       - windows
       - linux
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Public verification is explicitly bounded to 25 minutes below. Keep a
+    # generous buffer so a timeout still leaves time to return the release to Draft.
+    timeout-minutes: 60
     concurrency:
       group: release-publication-${{ github.repository }}
       cancel-in-progress: false
@@ -347,16 +343,16 @@ jobs:
               exit 1
             fi
           fi
-          if [[ "$REPAIR_RELEASE" == "true" ]]; then
-            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
-          else
-            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
-          fi
-
           release_exists=false
           release_is_draft=false
           if release_is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
             release_exists=true
+          fi
+
+          if [[ "$REPAIR_RELEASE" == "true" && "$release_is_draft" != "true" ]]; then
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+          else
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
           fi
 
           echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
@@ -368,7 +364,7 @@ jobs:
       - name: Verify existing published release
         if: ${{ steps.release_state.outputs.should_mutate != 'true' }}
         run: |
-          if ! npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
+          if ! timeout --foreground --kill-after=30s 25m npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
             echo "::error::Existing release is not healthy. Run workflow_dispatch from the default branch with platform=all, package=true, repair_release=true, and release_tag=$RELEASE_TAG."
             exit 1
           fi
@@ -421,9 +417,20 @@ jobs:
           node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
 
           gh release edit "$RELEASE_TAG" --draft=false --latest
-          if ! npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
+          if ! timeout --foreground --kill-after=30s 25m npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
             echo "::error::Published updater verification failed; returning the release to draft."
-            gh release edit "$RELEASE_TAG" --draft
+            release_drafted=false
+            for attempt in 1 2 3; do
+              if gh release edit "$RELEASE_TAG" --draft; then
+                release_drafted=true
+                break
+              fi
+              echo "::warning::Unable to return the release to draft (attempt $attempt of 3)."
+              sleep $((attempt * 5))
+            done
+            if [[ "$release_drafted" != "true" ]]; then
+              echo "::error::CRITICAL: Published verification failed and the release could not be returned to draft."
+            fi
             exit 1
           fi
         env:

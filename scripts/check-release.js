@@ -39,7 +39,7 @@ function parseSemanticVersion(value) {
     throw new Error(`Invalid semantic version: ${value}.`);
   }
   return {
-    core: match.slice(1, 4).map(Number),
+    core: match.slice(1, 4).map(BigInt),
     prerelease: match[4] ? match[4].split(".") : [],
   };
 }
@@ -57,7 +57,9 @@ function comparePrerelease(left, right) {
 
     const leftNumeric = /^\d+$/.test(left[index]);
     const rightNumeric = /^\d+$/.test(right[index]);
-    if (leftNumeric && rightNumeric) return Number(left[index]) < Number(right[index]) ? -1 : 1;
+    if (leftNumeric && rightNumeric) {
+      return BigInt(left[index]) < BigInt(right[index]) ? -1 : 1;
+    }
     if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
     return left[index] < right[index] ? -1 : 1;
   }

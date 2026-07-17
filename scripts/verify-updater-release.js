@@ -18,6 +18,36 @@ function positiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function updaterAssetName(entryUrl, repo, tag, platform) {
+  const url = new URL(entryUrl);
+  const repoParts = repo.split("/");
+  let pathParts;
+  try {
+    pathParts = url.pathname.split("/").map((part) => decodeURIComponent(part));
+  } catch {
+    throw new Error(`Updater URL for ${platform} contains invalid path encoding.`);
+  }
+
+  const expectedPrefix = ["", ...repoParts, "releases", "download", tag];
+  const matchesPrefix = expectedPrefix.every((part, index) => pathParts[index] === part);
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    repoParts.length !== 2 ||
+    pathParts.length !== expectedPrefix.length + 1 ||
+    !matchesPrefix
+  ) {
+    throw new Error(`Updater URL for ${platform} does not target ${repo} ${tag}.`);
+  }
+
+  return pathParts.at(-1);
+}
+
 function validateManifest(manifest, repo, tag) {
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Updater manifest is not a JSON object.");
@@ -42,12 +72,7 @@ function validateManifest(manifest, repo, tag) {
       throw new Error(`Updater manifest has no URL for ${platform}.`);
     }
 
-    const url = new URL(entry.url);
-    const expectedPrefix = `/${repo}/releases/download/${encodeURIComponent(tag)}/`;
-    if (url.protocol !== "https:" || url.hostname !== "github.com" || !url.pathname.startsWith(expectedPrefix)) {
-      throw new Error(`Updater URL for ${platform} does not target ${repo} ${tag}.`);
-    }
-    const assetName = decodeURIComponent(url.pathname.split("/").pop() || "");
+    const assetName = updaterAssetName(entry.url, repo, tag, platform);
     if (!assetName.endsWith(suffix)) {
       throw new Error(`Updater URL for ${platform} does not end with ${suffix}.`);
     }

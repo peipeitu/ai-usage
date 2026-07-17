@@ -57,6 +57,35 @@ test("manifest validation rejects asset names that GitHub normalizes", () => {
   );
 });
 
+test("manifest validation accepts SemVer build metadata in the release tag", () => {
+  const manifest = manifestFixture();
+  manifest.version = "1.2.3+build.1";
+  for (const entry of Object.values(manifest.platforms)) {
+    entry.url = entry.url.replace("v1.2.3", "v1.2.3+build.1");
+  }
+
+  assert.doesNotThrow(() =>
+    validateManifest(manifest, "owner/repo", "v1.2.3+build.1"),
+  );
+});
+
+test("manifest validation rejects extra path segments and URL parameters", () => {
+  const extraSegment = manifestFixture();
+  extraSegment.platforms["windows-x86_64"].url =
+    "https://github.com/owner/repo/releases/download/v1.2.3/nested/app.exe";
+  assert.throws(
+    () => validateManifest(extraSegment, "owner/repo", "v1.2.3"),
+    /does not target/,
+  );
+
+  const queryString = manifestFixture();
+  queryString.platforms["windows-x86_64"].url += "?download=1";
+  assert.throws(
+    () => validateManifest(queryString, "owner/repo", "v1.2.3"),
+    /does not target/,
+  );
+});
+
 test("release verification downloads and cryptographically verifies released assets", async () => {
   const manifest = manifestFixture();
   const requested = [];

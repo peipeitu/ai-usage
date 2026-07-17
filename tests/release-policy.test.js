@@ -31,13 +31,16 @@ test("release policy permits an explicit published-release repair", () => {
   );
 });
 
-test("release policy rejects repair for missing or draft releases", () => {
+test("release policy resumes a draft during explicit repair", () => {
+  assert.deepEqual(
+    releaseMutationPolicy({ exists: true, isDraft: true, repair: true }),
+    { shouldMutate: true },
+  );
+});
+
+test("release policy rejects repair for a missing release", () => {
   assert.throws(
     () => releaseMutationPolicy({ exists: false, isDraft: false, repair: true }),
-    /existing published release/,
-  );
-  assert.throws(
-    () => releaseMutationPolicy({ exists: true, isDraft: true, repair: true }),
-    /existing published release/,
+    /existing release/,
   );
 });

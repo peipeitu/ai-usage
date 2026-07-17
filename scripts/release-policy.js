@@ -16,8 +16,8 @@ function releaseMutationPolicy({ exists, isDraft, repair }) {
   if (!exists && isDraft) {
     throw new Error("A non-existent release cannot be a draft.");
   }
-  if (repair && (!exists || isDraft)) {
-    throw new Error("Release repair requires an existing published release.");
+  if (repair && !exists) {
+    throw new Error("Release repair requires an existing release.");
   }
   return {
     shouldMutate: !exists || isDraft || repair,

@@ -114,8 +114,35 @@ test("release check rejects a different tag with equal semantic precedence", (t)
   assert.match(result.stderr, /conflicts with latest release/);
 });
 
+test("release check rejects an older arbitrarily large numeric prerelease", (t) => {
+  const version = "1.2.3-alpha.9007199254740992";
+  const fixture = releaseFixture(t, { packageJson: version });
+  const result = runCheck(
+    fixture,
+    `v${version}`,
+    "v1.2.3-alpha.9007199254740993",
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /older than latest release/);
+});
+
 test("semantic version comparison orders prereleases before stable versions", () => {
   assert.equal(compareSemanticVersions("v1.2.3-beta.2", "v1.2.3-beta.10"), -1);
   assert.equal(compareSemanticVersions("v1.2.3-rc.1", "v1.2.3"), -1);
   assert.equal(compareSemanticVersions("v1.2.3", "v1.2.3"), 0);
+});
+
+test("semantic version comparison preserves arbitrarily large numeric identifiers", () => {
+  assert.equal(
+    compareSemanticVersions(
+      "v1.2.3-alpha.9007199254740992",
+      "v1.2.3-alpha.9007199254740993",
+    ),
+    -1,
+  );
+  assert.equal(
+    compareSemanticVersions("v9007199254740992.0.0", "v9007199254740993.0.0"),
+    -1,
+  );
 });
