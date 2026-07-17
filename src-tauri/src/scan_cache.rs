@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{Instant, UNIX_EPOCH},
 };
@@ -362,7 +362,7 @@ fn normalize_existing_path(path: &Path) -> String {
 fn normalize_platform_path(path: &Path) -> String {
     #[cfg(target_os = "windows")]
     {
-        return normalize_windows_path_text(&path.to_string_lossy());
+        normalize_windows_path_text(&path.to_string_lossy())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -370,8 +370,8 @@ fn normalize_platform_path(path: &Path) -> String {
         let mut output = PathBuf::new();
         for component in path.components() {
             match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
                     output.pop();
                 }
                 component => output.push(component.as_os_str()),
