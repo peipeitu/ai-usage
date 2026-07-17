@@ -201,7 +201,7 @@ A normal rerun never overwrites an existing published release: it verifies the p
 gh workflow run build.yml --ref main -f platform=all -f package=true -f repair_release=true -f release_tag=v0.1.6
 ```
 
-Repair mode is accepted only for an existing published release. It keeps the current workflow tooling on `main` while building the application source from `release_tag`. A tag older than the current GitHub Latest release is rejected before packaging so a historical rerun cannot move the updater channel backwards.
+Repair mode is accepted only for an existing published release. It keeps the current workflow tooling on `main` while building the application source from `release_tag`. Release publication jobs share a repository-wide queue, and the workflow checks GitHub Latest again immediately before publishing, so concurrent or historical runs cannot move the updater channel backwards.
 
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 
