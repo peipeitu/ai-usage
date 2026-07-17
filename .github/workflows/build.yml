@@ -26,13 +26,115 @@ on:
         required: true
         default: true
         type: boolean
+      repair_release:
+        description: "Repair or resume an existing release (tag + all platforms only)"
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: "Published tag to repair (repair mode only)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  REPAIR_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
+  RELEASE_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.repair_release && inputs.release_tag) || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+  SOURCE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release && 'release-source' || '.' }}
 
 permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HAS_UPDATER_SIGNING: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate manual release inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          if [[ "$REPAIR_RELEASE" == "true" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+              echo "::error::Release repair must run from the default branch ($DEFAULT_BRANCH)."
+              exit 1
+            fi
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo "::error::Release repair requires release_tag in vX.Y.Z[-prerelease][+build] format."
+              exit 1
+            fi
+            if [[ "$RELEASE_PLATFORM" != "all" || "$PACKAGE_RELEASE" != "true" ]]; then
+              echo "::error::Release repair requires platform=all and package=true."
+              exit 1
+            fi
+          elif [[ -n "$REQUESTED_RELEASE_TAG" ]]; then
+            echo "::error::release_tag is accepted only when repair_release=true."
+            exit 1
+          fi
+        env:
+          REPAIR_RELEASE: ${{ inputs.repair_release }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          PACKAGE_RELEASE: ${{ inputs.package }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+      - name: Checkout release source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.release_tag) }}
+          path: release-source
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check release configuration
+        run: node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG"
+
+      - name: Validate release ordering and repair target
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.repair_release) }}
+        run: |
+          latest_tag=""
+          if ! latest_tag=$(gh release view --json tagName --jq '.tagName' 2>/dev/null); then
+            published_count=$(gh release list --exclude-drafts --limit 1 --json tagName --jq 'length')
+            if [[ "$published_count" != "0" ]]; then
+              echo "::error::Unable to resolve the GitHub Latest release."
+              exit 1
+            fi
+          fi
+          if [[ "$REPAIR_RELEASE" == "true" ]]; then
+            if ! release_is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft'); then
+              echo "::error::Release repair requires an existing release."
+              exit 1
+            fi
+            if [[ "$release_is_draft" == "true" ]]; then
+              node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+            else
+              node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+            fi
+          else
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Require updater signing for tagged releases
+        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.repair_release)) && env.HAS_UPDATER_SIGNING != 'true' }}
+        run: |
+          echo "::error::Tagged releases require AI_USAGE_UPDATER_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY."
+          exit 1
+
   windows:
     name: Windows
+    needs: preflight
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'windows' || inputs.platform == 'all' }}
     runs-on: windows-latest
     timeout-minutes: 30
@@ -42,6 +144,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Checkout release source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.release_tag) }}
+          path: release-source
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,30 +161,37 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: ${{ env.SOURCE_DIR }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci --loglevel=error --fund=false --audit=false
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Test
         run: npm test
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Lint
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Package signed
         if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING == 'true' }}
         run: npm run package:win
+        working-directory: ${{ env.SOURCE_DIR }}
         env:
           AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:win:unsigned
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Upload artifact
         if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package) }}
@@ -83,13 +199,14 @@ jobs:
         with:
           name: ai-usage-windows
           path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.sig
+            ${{ env.SOURCE_DIR }}/src-tauri/target/release/bundle/nsis/*.exe
+            ${{ env.SOURCE_DIR }}/src-tauri/target/release/bundle/nsis/*.sig
           if-no-files-found: error
           retention-days: 1
 
   linux:
     name: Linux
+    needs: preflight
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'linux' || inputs.platform == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -99,6 +216,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Checkout release source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.release_tag) }}
+          path: release-source
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -109,9 +233,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: ${{ env.SOURCE_DIR }}/package-lock.json
 
       - name: Install dependencies
         run: npm ci --loglevel=error --fund=false --audit=false
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Install Tauri Linux dependencies
         run: |
@@ -124,24 +250,29 @@ jobs:
 
       - name: Test
         run: npm test
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Lint
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Package signed
         if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING == 'true' }}
         run: npm run package:linux
+        working-directory: ${{ env.SOURCE_DIR }}
         env:
           AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package unsigned
-        if: ${{ (startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package)) && env.HAS_UPDATER_SIGNING != 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.package && env.HAS_UPDATER_SIGNING != 'true' }}
         run: npm run package:linux:unsigned
+        working-directory: ${{ env.SOURCE_DIR }}
 
       - name: Upload artifact
         if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.package) }}
@@ -149,27 +280,38 @@ jobs:
         with:
           name: ai-usage-linux
           path: |
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/appimage/*.sig
-            src-tauri/target/release/bundle/deb/*.deb
+            ${{ env.SOURCE_DIR }}/src-tauri/target/release/bundle/appimage/*.AppImage
+            ${{ env.SOURCE_DIR }}/src-tauri/target/release/bundle/appimage/*.sig
+            ${{ env.SOURCE_DIR }}/src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
           retention-days: 1
 
   release:
     name: Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.repair_release) }}
     needs:
       - windows
       - linux
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Public verification is explicitly bounded to 25 minutes below. Keep a
+    # generous buffer so a timeout still leaves time to return the release to Draft.
+    timeout-minutes: 60
+    concurrency:
+      group: release-publication-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
-    env:
-      HAS_UPDATER_SIGNING: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY != '' && secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Checkout release source
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.release_tag) }}
+          path: release-source
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -181,21 +323,116 @@ jobs:
         with:
           path: release-artifacts
 
-      - name: Generate updater manifest
-        if: ${{ env.HAS_UPDATER_SIGNING == 'true' }}
-        run: node scripts/write-latest-json.js --artifacts release-artifacts --output release-artifacts/latest.json --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
+      - name: Verify updater signatures
+        run: npm run updater:verify-signatures -- --artifacts release-artifacts
+        env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
 
-      - name: Upload release assets
+      - name: Generate updater manifest
+        run: node scripts/write-latest-json.js --artifacts release-artifacts --output release-artifacts/latest.json --repo "${{ github.repository }}" --tag "$RELEASE_TAG"
+
+      - name: Inspect release state
+        id: release_state
         shell: bash
         run: |
-          gh release view "${{ github.ref_name }}" \
-            || gh release create "${{ github.ref_name }}" --title "AI Usage ${{ github.ref_name }}" --generate-notes \
-            || gh release view "${{ github.ref_name }}"
+          latest_tag=""
+          if ! latest_tag=$(gh release view --json tagName --jq '.tagName' 2>/dev/null); then
+            published_count=$(gh release list --exclude-drafts --limit 1 --json tagName --jq 'length')
+            if [[ "$published_count" != "0" ]]; then
+              echo "::error::Unable to resolve the GitHub Latest release."
+              exit 1
+            fi
+          fi
+          release_exists=false
+          release_is_draft=false
+          if release_is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            release_exists=true
+          fi
+
+          if [[ "$REPAIR_RELEASE" == "true" && "$release_is_draft" != "true" ]]; then
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag" --require-latest
+          else
+            node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+          fi
+
+          echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
+          echo "release_is_draft=$release_is_draft" >> "$GITHUB_OUTPUT"
+          node scripts/release-policy.js --exists "$release_exists" --draft "$release_is_draft" --repair "${{ github.event_name == 'workflow_dispatch' && inputs.repair_release }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify existing published release
+        if: ${{ steps.release_state.outputs.should_mutate != 'true' }}
+        run: |
+          if ! timeout --foreground --kill-after=30s 25m npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
+            echo "::error::Existing release is not healthy. Run workflow_dispatch from the default branch with platform=all, package=true, repair_release=true, and release_tag=$RELEASE_TAG."
+            exit 1
+          fi
+          echo "Existing published release is healthy; skipping asset replacement."
+        env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
+
+      - name: Prepare draft release
+        if: ${{ steps.release_state.outputs.should_mutate == 'true' }}
+        run: |
+          if [[ "$RELEASE_EXISTS" != "true" ]]; then
+            gh release create "$RELEASE_TAG" --draft --verify-tag --title "AI Usage $RELEASE_TAG" --generate-notes
+          elif [[ "$RELEASE_IS_DRAFT" != "true" ]]; then
+            gh release edit "$RELEASE_TAG" --draft
+          else
+            echo "Reusing existing draft release."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EXISTS: ${{ steps.release_state.outputs.release_exists }}
+          RELEASE_IS_DRAFT: ${{ steps.release_state.outputs.release_is_draft }}
+
+      - name: Upload release assets to draft
+        if: ${{ steps.release_state.outputs.should_mutate == 'true' }}
+        shell: bash
+        run: |
           mapfile -t assets < <(find release-artifacts -type f \( -name '*.exe' -o -name '*.sig' -o -name '*.AppImage' -o -name '*.deb' -o -name 'latest.json' \))
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "No release assets found."
             exit 1
           fi
-          gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
         env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish and verify updater release
+        if: ${{ steps.release_state.outputs.should_mutate == 'true' }}
+        run: |
+          latest_tag=""
+          if ! latest_tag=$(gh release view --json tagName --jq '.tagName' 2>/dev/null); then
+            published_count=$(gh release list --exclude-drafts --limit 1 --json tagName --jq 'length')
+            if [[ "$published_count" != "0" ]]; then
+              echo "::error::Unable to resolve the GitHub Latest release immediately before publication."
+              exit 1
+            fi
+          fi
+          # A repair target is already a draft at this point, so it cannot itself be
+          # GitHub Latest. Requiring that no newer published release exists still
+          # prevents the repaired release from moving the updater channel backwards.
+          node scripts/check-release.js --root "$SOURCE_DIR" --tag "$RELEASE_TAG" --latest-tag "$latest_tag"
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          if ! timeout --foreground --kill-after=30s 25m npm run release:verify -- --repo "${{ github.repository }}" --tag "$RELEASE_TAG"; then
+            echo "::error::Published updater verification failed; returning the release to draft."
+            release_drafted=false
+            for attempt in 1 2 3; do
+              if gh release edit "$RELEASE_TAG" --draft; then
+                release_drafted=true
+                break
+              fi
+              echo "::warning::Unable to return the release to draft (attempt $attempt of 3)."
+              sleep $((attempt * 5))
+            done
+            if [[ "$release_drafted" != "true" ]]; then
+              echo "::error::CRITICAL: Published verification failed and the release could not be returned to draft."
+            fi
+            exit 1
+          fi
+        env:
+          AI_USAGE_UPDATER_PUBLIC_KEY: ${{ secrets.AI_USAGE_UPDATER_PUBLIC_KEY }}
           GH_TOKEN: ${{ github.token }}

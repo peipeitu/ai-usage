@@ -166,7 +166,7 @@ Automatic updates are enabled only for Windows and Linux release builds. macOS i
 Generate updater signing keys once:
 
 ```sh
-npm run tauri signer generate -- -w ~/.tauri/ai-usage.key
+npx tauri signer generate -w ~/.tauri/ai-usage.key
 ```
 
 Keep the private key secret. Build Windows or Linux releases with the public key embedded and the private key available for artifact signing:
@@ -185,7 +185,23 @@ $env:TAURI_SIGNING_PRIVATE_KEY="C:\Users\you\.tauri\ai-usage.key"
 npm run package:win
 ```
 
-The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Tagged GitHub Actions releases generate and upload this updater manifest automatically when updater signing secrets are configured.
+The app checks `https://github.com/peipeitu/ai-usage/releases/latest/download/latest.json`. Tagged GitHub Actions releases require updater signing and always generate and upload this manifest.
+
+Tagged releases require these GitHub Actions repository secrets:
+
+- `AI_USAGE_UPDATER_PUBLIC_KEY`: the complete contents of `ai-usage.key.pub`.
+- `TAURI_SIGNING_PRIVATE_KEY`: the complete contents of `ai-usage.key`, not a local file path.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the private-key password when the key is encrypted; omit it for an unencrypted key.
+
+Tagged builds fail before packaging when the public or private key is missing. Unsigned packages are available only through a manual `workflow_dispatch` build. CI verifies both installers against the configured public key before uploading them to a draft release. After publishing, it verifies the tag-specific manifest and client-facing `latest` manifest, downloads both released installers, and cryptographically verifies them against their uploaded signatures and the configured public key; a failed public verification returns the release to draft.
+
+A normal rerun never overwrites an existing published release: it verifies the public assets and exits successfully when they are healthy. If the current latest release is published but broken, start the current workflow from `main` and explicitly select the source tag to rebuild:
+
+```sh
+gh workflow run build.yml --ref main -f platform=all -f package=true -f repair_release=true -f release_tag=v0.1.6
+```
+
+Repair mode is accepted only for an existing release. A published target must be the current GitHub Latest release; a Draft target may resume an interrupted repair only when it is not older than the current Latest release. Repair keeps the current workflow tooling on `main` while building the application source from `release_tag`. Release publication jobs share a repository-wide queue, and the workflow checks GitHub Latest again immediately before publishing, so concurrent or historical runs cannot move the updater channel backwards.
 
 For a local signed release dry run, generate the manifest from already-built Windows and Linux artifacts:
 
