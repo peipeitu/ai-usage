@@ -19,7 +19,7 @@ use std::{
 use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
-use scan_cache::{cache_source_key, ScanCacheStore, ScanDiagnostics, ScanRequest};
+use scan_cache::{cache_source_key, ScanCacheStore, ScanDiagnostics, ScanRequest, ScannedFile};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
@@ -2205,6 +2205,26 @@ fn read_codex_usage_events(threads: &[Thread]) -> Vec<UsageEvent> {
     events
 }
 
+fn bind_codex_usage_events(
+    scanned_files: Vec<ScannedFile<UsageEvent>>,
+    rollout_threads: &HashMap<PathBuf, Vec<Thread>>,
+) -> Vec<UsageEvent> {
+    let mut usage_events = Vec::new();
+    for scanned_file in scanned_files {
+        let Some(threads) = rollout_threads.get(&scanned_file.path) else {
+            continue;
+        };
+        for thread in threads {
+            usage_events.extend(scanned_file.values.iter().cloned().map(|mut event| {
+                event.thread_id = thread.id.clone();
+                event.model = thread.model.clone();
+                event
+            }));
+        }
+    }
+    usage_events
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_stats_from_threads(
     mut threads: Vec<Thread>,
@@ -2582,11 +2602,16 @@ fn read_codex_stats(
     }
 
     let mut threads = read_codex_threads(&state_db)?;
-    let rollout_threads = threads
+    let mut rollout_threads = HashMap::<PathBuf, Vec<Thread>>::new();
+    for thread in threads
         .iter()
         .filter(|thread| !thread.rollout_path.is_empty())
-        .map(|thread| (PathBuf::from(&thread.rollout_path), thread.clone()))
-        .collect::<HashMap<_, _>>();
+    {
+        rollout_threads
+            .entry(PathBuf::from(&thread.rollout_path))
+            .or_default()
+            .push(thread.clone());
+    }
     let rollout_files = rollout_threads.keys().cloned().collect::<Vec<_>>();
     let outcome = scan_cache.scan(
         scan_request(
@@ -2600,22 +2625,13 @@ fn read_codex_stats(
             File::open(path).map_err(|error| error.to_string())?;
             let thread = rollout_threads
                 .get(path)
+                .and_then(|threads| threads.first())
                 .ok_or_else(|| "Codex rollout no longer belongs to a known thread".to_string())?;
             Ok(read_codex_usage_events(std::slice::from_ref(thread)))
         },
     );
     let diagnostics = outcome.diagnostics.clone();
-    let mut usage_events = Vec::new();
-    for scanned_file in outcome.files {
-        let Some(thread) = rollout_threads.get(&scanned_file.path) else {
-            continue;
-        };
-        usage_events.extend(scanned_file.values.into_iter().map(|mut event| {
-            event.thread_id = thread.id.clone();
-            event.model = thread.model.clone();
-            event
-        }));
-    }
+    let usage_events = bind_codex_usage_events(outcome.files, &rollout_threads);
     let mut usage_by_thread: HashMap<String, Vec<UsageEvent>> = HashMap::new();
     for event in usage_events {
         usage_by_thread
@@ -3165,7 +3181,7 @@ fn read_claude_stats(
         ));
     }
 
-    let files = scan_candidate_files(&projects_path, is_claude_session_file)
+    let files = scan_all_candidate_files(&projects_path, is_claude_session_file)
         .map_err(|failures| scan_enumeration_error("claude", failures))?;
     let outcome = scan_cache.scan(
         scan_request(
@@ -4968,6 +4984,27 @@ fn scan_candidate_files(
     root: &Path,
     is_candidate: fn(&Path) -> bool,
 ) -> Result<Vec<PathBuf>, usize> {
+    scan_candidate_files_with_limits(
+        root,
+        is_candidate,
+        Some(DEFAULT_SCAN_MAX_DEPTH),
+        Some(DEFAULT_SCAN_MAX_FILES),
+    )
+}
+
+fn scan_all_candidate_files(
+    root: &Path,
+    is_candidate: fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, usize> {
+    scan_candidate_files_with_limits(root, is_candidate, None, None)
+}
+
+fn scan_candidate_files_with_limits(
+    root: &Path,
+    is_candidate: fn(&Path) -> bool,
+    max_depth: Option<usize>,
+    max_files: Option<usize>,
+) -> Result<Vec<PathBuf>, usize> {
     if root.is_file() {
         return Ok(is_candidate(root)
             .then(|| root.to_path_buf())
@@ -4978,7 +5015,10 @@ fn scan_candidate_files(
     let mut visited_files = 0_usize;
     let mut files = Vec::new();
     let mut failures = 0_usize;
-    for entry in WalkDir::new(root).max_depth(DEFAULT_SCAN_MAX_DEPTH) {
+    let walker = max_depth
+        .map(|max_depth| WalkDir::new(root).max_depth(max_depth))
+        .unwrap_or_else(|| WalkDir::new(root));
+    for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -4991,7 +5031,7 @@ fn scan_candidate_files(
         }
 
         visited_files += 1;
-        if visited_files > DEFAULT_SCAN_MAX_FILES {
+        if max_files.is_some_and(|max_files| visited_files > max_files) {
             failures += 1;
             break;
         }
@@ -6149,6 +6189,47 @@ mod tests {
     }
 
     #[test]
+    fn bind_codex_usage_events_keeps_threads_that_share_a_rollout() {
+        let rollout_path = PathBuf::from("shared-rollout.jsonl");
+        let thread = |id: &str, model: &str| Thread {
+            id: id.to_string(),
+            title: id.to_string(),
+            source: "Codex".to_string(),
+            model: model.to_string(),
+            cwd: "/work/app".to_string(),
+            archived: false,
+            tokens_used: 10,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            rollout_path: rollout_path.to_string_lossy().to_string(),
+            usage_events: Vec::new(),
+        };
+        let rollout_threads = HashMap::from([(
+            rollout_path.clone(),
+            vec![thread("one", "gpt-one"), thread("two", "gpt-two")],
+        )]);
+        let scanned_files = vec![ScannedFile {
+            path: rollout_path,
+            values: vec![UsageEvent {
+                thread_id: "cached".to_string(),
+                timestamp_ms: 3,
+                model: "cached-model".to_string(),
+                total_tokens: 10,
+                plan_type: None,
+                rate_limits: None,
+            }],
+        }];
+
+        let events = bind_codex_usage_events(scanned_files, &rollout_threads);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].thread_id, "one");
+        assert_eq!(events[0].model, "gpt-one");
+        assert_eq!(events[1].thread_id, "two");
+        assert_eq!(events[1].model, "gpt-two");
+    }
+
+    #[test]
     fn build_stats_from_threads_aggregates_codex_usage_events() {
         let now = DateTime::parse_from_rfc3339("2026-06-30T12:00:00.000Z")
             .unwrap()
@@ -6272,6 +6353,29 @@ mod tests {
             files[0].file_name().and_then(|name| name.to_str()),
             Some("copilot-chat.jsonl")
         );
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn unbounded_candidate_scan_keeps_deep_claude_sessions() {
+        let root = temp_jsonl_path("claude-projects");
+        fs::create_dir_all(&root).expect("scan root should be created");
+        let mut nested = root.clone();
+        for depth in 0..DEFAULT_SCAN_MAX_DEPTH {
+            nested = nested.join(format!("level-{depth}"));
+        }
+        fs::create_dir_all(&nested).expect("nested fixture should be created");
+        let session = nested.join("session.jsonl");
+        fs::write(&session, "{}").expect("deep Claude session should exist");
+
+        let limited = scan_candidate_files(&root, is_claude_session_file)
+            .expect("depth limiting is not an enumeration failure");
+        let unbounded = scan_all_candidate_files(&root, is_claude_session_file)
+            .expect("fixture enumeration should be complete");
+
+        assert!(limited.is_empty());
+        assert_eq!(unbounded, vec![session]);
 
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }

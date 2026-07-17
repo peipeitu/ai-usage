@@ -24,6 +24,7 @@ pub(crate) struct ScanDiagnostics {
     pub cache_status: String,
     pub forced: bool,
     pub cache_write_succeeded: bool,
+    pub cache_write_skipped: bool,
 }
 
 impl ScanDiagnostics {
@@ -39,7 +40,7 @@ impl ScanDiagnostics {
 
     pub(crate) fn record(&self) {
         eprintln!(
-            "[scan] provider={} elapsed_ms={} total_files={} cache_hits={} parsed_files={} deleted_files={} failed_files={} hit_rate={:.1}% cache_status={} forced={} cache_write_succeeded={}",
+            "[scan] provider={} elapsed_ms={} total_files={} cache_hits={} parsed_files={} deleted_files={} failed_files={} hit_rate={:.1}% cache_status={} forced={} cache_write_succeeded={} cache_write_skipped={}",
             self.provider,
             self.elapsed_ms,
             self.total_files,
@@ -51,6 +52,7 @@ impl ScanDiagnostics {
             self.cache_status,
             self.forced,
             self.cache_write_succeeded,
+            self.cache_write_skipped,
         );
     }
 }
@@ -161,20 +163,23 @@ impl ScanCacheStore {
             ..ScanDiagnostics::default()
         };
         let mut current_paths = BTreeMap::new();
+        let mut observed_paths = BTreeSet::new();
         for path in request.files {
+            let normalized_path = normalize_existing_path(&path);
+            observed_paths.insert(normalized_path.clone());
             match fingerprint(&path) {
                 Ok(fingerprint) => {
                     current_paths
-                        .entry(fingerprint.normalized_path.clone())
+                        .entry(normalized_path)
                         .or_insert((path, fingerprint));
                 }
                 Err(_) => diagnostics.failed_files += 1,
             }
         }
-        diagnostics.total_files = current_paths.len() + diagnostics.failed_files;
+        diagnostics.total_files = observed_paths.len();
         diagnostics.deleted_files = old_files
             .keys()
-            .filter(|path| !current_paths.contains_key(*path))
+            .filter(|path| !observed_paths.contains(*path))
             .count();
 
         let mut next_files = BTreeMap::new();
@@ -221,12 +226,12 @@ impl ScanCacheStore {
             source_key: request.source_key,
             files: next_files,
         };
-        let should_write = cache_status != "hit"
-            || diagnostics.parsed_files > 0
-            || diagnostics.deleted_files > 0
-            || diagnostics.failed_files > 0;
-        diagnostics.cache_write_succeeded =
-            !should_write || super::write_json_file(&request.cache_path, &cache).is_ok();
+        let should_write =
+            cache_status != "hit" || diagnostics.parsed_files > 0 || diagnostics.deleted_files > 0;
+        diagnostics.cache_write_skipped = diagnostics.failed_files > 0;
+        diagnostics.cache_write_succeeded = !should_write
+            || diagnostics.cache_write_skipped
+            || super::write_json_file(&request.cache_path, &cache).is_ok();
         diagnostics.elapsed_ms = started_at
             .elapsed()
             .as_millis()
@@ -355,7 +360,19 @@ pub(crate) fn cache_source_key(paths: &[PathBuf]) -> String {
 }
 
 fn normalize_existing_path(path: &Path) -> String {
-    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = fs::canonicalize(path)
+        .or_else(|_| {
+            let parent = path.parent().ok_or(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scan path has no parent",
+            ))?;
+            let file_name = path.file_name().ok_or(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scan path has no file name",
+            ))?;
+            fs::canonicalize(parent).map(|parent| parent.join(file_name))
+        })
+        .unwrap_or_else(|_| path.to_path_buf());
     normalize_platform_path(&path)
 }
 
@@ -711,17 +728,41 @@ mod tests {
         fs::write(&path, "5").unwrap();
         let store = ScanCacheStore::default();
         store.scan(request(&dir, vec![path.clone()]), parse_number);
+        let complete_cache = fs::read(dir.join("cache.json")).unwrap();
 
         fs::write(&path, "invalid").unwrap();
         let failed = store.scan(request(&dir, vec![path.clone()]), parse_number);
         assert!(failed.clone().into_values().is_empty());
         assert_eq!(failed.diagnostics.failed_files, 1);
         assert_eq!(failed.diagnostics.cache_hits, 0);
+        assert!(failed.diagnostics.cache_write_skipped);
+        assert_eq!(fs::read(dir.join("cache.json")).unwrap(), complete_cache);
 
         fs::write(&path, "9").unwrap();
         let recovered = store.scan(request(&dir, vec![path.clone()]), parse_number);
         assert_eq!(recovered.clone().into_values(), vec![9]);
         assert_eq!(recovered.diagnostics.parsed_files, 1);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_failures_preserve_cache_and_are_not_reported_as_deletions() {
+        let dir = fixture_dir("fingerprint-failure");
+        let path = dir.join("session.jsonl");
+        fs::write(&path, "5").unwrap();
+        let store = ScanCacheStore::default();
+        store.scan(request(&dir, vec![path.clone()]), parse_number);
+        let complete_cache = fs::read(dir.join("cache.json")).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        let failed = store.scan(request(&dir, vec![path]), parse_number);
+
+        assert_eq!(failed.diagnostics.total_files, 1);
+        assert_eq!(failed.diagnostics.failed_files, 1);
+        assert_eq!(failed.diagnostics.deleted_files, 0);
+        assert!(failed.diagnostics.cache_write_skipped);
+        assert_eq!(fs::read(dir.join("cache.json")).unwrap(), complete_cache);
 
         fs::remove_dir_all(dir).unwrap();
     }
