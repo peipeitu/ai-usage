@@ -651,6 +651,32 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_changes_during_parsing_is_retried_before_caching() {
+        let dir = fixture_dir("changes-during-parse");
+        let path = dir.join("session.jsonl");
+        fs::write(&path, "21").unwrap();
+        let store = ScanCacheStore::default();
+        let mut attempts = 0_usize;
+
+        let outcome = store.scan(request(&dir, vec![path.clone()]), |path| {
+            attempts += 1;
+            let values = parse_number(path)?;
+            if attempts == 1 {
+                fs::write(path, "222").map_err(|error| error.to_string())?;
+            }
+            Ok(values)
+        });
+
+        assert_eq!(attempts, 2);
+        assert_eq!(outcome.into_values(), vec![222]);
+        let hot = store.scan(request(&dir, vec![path]), parse_number);
+        assert_eq!(hot.diagnostics.cache_hits, 1);
+        assert_eq!(hot.into_values(), vec![222]);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn corrupt_and_incompatible_caches_rebuild_without_old_data() {
         let dir = fixture_dir("recovery");
         let path = dir.join("session.jsonl");
