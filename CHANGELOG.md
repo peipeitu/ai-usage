@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7 - 2026-07-18
+
+- Add versioned per-file persistent scan caches for Codex, Claude Code, GitHub Copilot, Cursor, and ChatGPT so unchanged local data no longer needs to be parsed on every refresh.
+- Invalidate changed, replaced, truncated, deleted, and SQLite sidecar-backed files safely, preserve the last complete cache after transient failures, and serialize concurrent refresh transactions.
+- Add backend commands for forced cache rebuilds and scan diagnostics covering elapsed time, file counts, cache hits, reparses, deletions, failures, and cache writes.
+- Harden signed updater releases with fail-closed artifact checks, cryptographic signature verification, draft-first publication, public download verification, and recoverable repair runs.
+
 ## 0.1.6 - 2026-07-16
 
 - Add tray usage status with background refresh, provider-aware quota display, and synchronized language and settings behavior.
