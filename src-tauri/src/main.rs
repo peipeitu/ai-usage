@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod scan_cache;
+
 use std::{
     collections::HashMap,
     env,
@@ -11,12 +13,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
+use scan_cache::{cache_source_key, ScanCacheStore, ScanDiagnostics, ScanRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{
@@ -98,6 +101,8 @@ struct TrayUiState {
     display: Mutex<TrayDisplayState>,
     auto_refresh_notify: Arc<tokio::sync::Notify>,
     stats_scan_lock: Arc<Mutex<()>>,
+    scan_cache: Arc<ScanCacheStore>,
+    scan_diagnostics: Arc<Mutex<HashMap<String, ScanDiagnostics>>>,
     open_item: MenuItem<tauri::Wry>,
     quit_item: MenuItem<tauri::Wry>,
 }
@@ -246,7 +251,7 @@ struct LatestThread {
     cwd: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RateLimitWindow {
     id: String,
@@ -257,7 +262,7 @@ struct RateLimitWindow {
     resets_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RateLimits {
     updated_at: Option<String>,
@@ -301,7 +306,7 @@ struct DailyTokenHistory {
     daily_tokens: HashMap<String, u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Thread {
     id: String,
     title: String,
@@ -316,7 +321,7 @@ struct Thread {
     usage_events: Vec<UsageEvent>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct UsageEvent {
     thread_id: String,
     timestamp_ms: i64,
@@ -324,6 +329,11 @@ struct UsageEvent {
     total_tokens: u64,
     plan_type: Option<String>,
     rate_limits: Option<RateLimits>,
+}
+
+struct StatsScanResult {
+    stats: Stats,
+    diagnostics: ScanDiagnostics,
 }
 
 #[derive(Serialize)]
@@ -449,6 +459,53 @@ fn settings_path() -> PathBuf {
 
 fn usage_history_path() -> PathBuf {
     settings_path().with_file_name("usage-history.json")
+}
+
+fn scan_cache_dir() -> PathBuf {
+    settings_path().with_file_name("scan-cache")
+}
+
+fn scan_request(
+    provider: &str,
+    parser_version: &str,
+    roots: &[PathBuf],
+    files: Vec<PathBuf>,
+    force: bool,
+) -> ScanRequest {
+    ScanRequest {
+        provider: provider.to_string(),
+        parser_version: parser_version.to_string(),
+        source_key: cache_source_key(roots),
+        cache_path: scan_cache_dir().join(format!("{provider}.json")),
+        files,
+        force,
+    }
+}
+
+fn finish_scan(
+    provider: &str,
+    started_at: Instant,
+    stats: Stats,
+    mut diagnostics: ScanDiagnostics,
+) -> StatsScanResult {
+    diagnostics.provider = provider.to_string();
+    diagnostics.elapsed_ms = started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    diagnostics.record();
+    StatsScanResult { stats, diagnostics }
+}
+
+fn remember_scan_diagnostics(
+    diagnostics_store: &Mutex<HashMap<String, ScanDiagnostics>>,
+    diagnostics: &ScanDiagnostics,
+) {
+    diagnostics_store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(diagnostics.provider.clone(), diagnostics.clone());
 }
 
 fn load_settings() -> Settings {
@@ -931,14 +988,17 @@ async fn refresh_active_tray_usage(app: tauri::AppHandle, mut request_id: u64) {
             return;
         };
         let scan_lock = state.stats_scan_lock.clone();
+        let scan_cache = state.scan_cache.clone();
+        let scan_diagnostics = state.scan_diagnostics.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
             let _scan = scan_lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let settings = load_settings();
             let provider = settings.active_provider.clone();
-            let stats = read_stats_for_provider(&settings, &provider)?;
-            Ok::<_, String>((provider, stats))
+            let result = read_stats_for_provider(&settings, &provider, &scan_cache, false)?;
+            remember_scan_diagnostics(&scan_diagnostics, &result.diagnostics);
+            Ok::<_, String>((provider, result.stats))
         })
         .await
         .map_err(|error| error.to_string())
@@ -1382,6 +1442,8 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         display: Mutex::new(display),
         auto_refresh_notify: Arc::new(tokio::sync::Notify::new()),
         stats_scan_lock: Arc::new(Mutex::new(())),
+        scan_cache: Arc::new(ScanCacheStore::default()),
+        scan_diagnostics: Arc::new(Mutex::new(HashMap::new())),
         open_item: open,
         quit_item: quit,
     }) {
@@ -1429,14 +1491,18 @@ fn update_settings(app: tauri::AppHandle, settings: Settings) -> Result<Settings
     Ok(settings)
 }
 
-#[tauri::command]
-async fn get_stats(app: tauri::AppHandle, provider: Option<String>) -> Result<Stats, String> {
+async fn run_stats_scan(
+    app: tauri::AppHandle,
+    provider: Option<String>,
+    force: bool,
+) -> Result<Stats, String> {
     let task_app = app.clone();
-    let scan_lock = app
+    let state = app
         .try_state::<TrayUiState>()
-        .ok_or_else(|| "tray state is not initialized".to_string())?
-        .stats_scan_lock
-        .clone();
+        .ok_or_else(|| "tray state is not initialized".to_string())?;
+    let scan_lock = state.stats_scan_lock.clone();
+    let scan_cache = state.scan_cache.clone();
+    let scan_diagnostics = state.scan_diagnostics.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _scan = scan_lock
             .lock()
@@ -1444,21 +1510,56 @@ async fn get_stats(app: tauri::AppHandle, provider: Option<String>) -> Result<St
         let settings = load_settings();
         let provider = provider.unwrap_or_else(|| settings.active_provider.clone());
         let request_id = begin_external_tray_refresh(&task_app, &provider);
-        let result = read_stats_for_provider(&settings, &provider);
+        let result = read_stats_for_provider(&settings, &provider, &scan_cache, force);
+        if let Ok(result) = &result {
+            remember_scan_diagnostics(&scan_diagnostics, &result.diagnostics);
+        }
         if let Some(request_id) = request_id {
             complete_external_tray_refresh(
                 &task_app,
                 request_id,
                 &provider,
-                result.as_ref().map_err(String::as_str),
+                result
+                    .as_ref()
+                    .map(|result| &result.stats)
+                    .map_err(String::as_str),
             );
         }
-        result.map(|stats| (provider, stats))
+        result.map(|result| (provider, result.stats))
     })
     .await
     .map_err(|error| error.to_string())?;
     let (_, stats) = result?;
     Ok(stats)
+}
+
+#[tauri::command]
+async fn get_stats(app: tauri::AppHandle, provider: Option<String>) -> Result<Stats, String> {
+    run_stats_scan(app, provider, false).await
+}
+
+#[tauri::command]
+async fn rebuild_stats_cache(
+    app: tauri::AppHandle,
+    provider: Option<String>,
+) -> Result<Stats, String> {
+    run_stats_scan(app, provider, true).await
+}
+
+#[tauri::command]
+fn get_scan_diagnostics(app: tauri::AppHandle) -> Result<Vec<ScanDiagnostics>, String> {
+    let state = app
+        .try_state::<TrayUiState>()
+        .ok_or_else(|| "tray state is not initialized".to_string())?;
+    let mut diagnostics = state
+        .scan_diagnostics
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    diagnostics.sort_by(|left, right| left.provider.cmp(&right.provider));
+    Ok(diagnostics)
 }
 
 #[tauri::command]
@@ -1488,11 +1589,12 @@ async fn choose_home(
 
     let folder = folder.to_string_lossy().to_string();
     let task_app = app.clone();
-    let scan_lock = app
+    let state = app
         .try_state::<TrayUiState>()
-        .ok_or_else(|| "tray state is not initialized".to_string())?
-        .stats_scan_lock
-        .clone();
+        .ok_or_else(|| "tray state is not initialized".to_string())?;
+    let scan_lock = state.stats_scan_lock.clone();
+    let scan_cache = state.scan_cache.clone();
+    let scan_diagnostics = state.scan_diagnostics.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let _scan = scan_lock
             .lock()
@@ -1510,16 +1612,22 @@ async fn choose_home(
         save_settings(&settings)?;
         sync_tray_settings(&task_app, &settings);
         let request_id = begin_external_tray_refresh(&task_app, &provider);
-        let stats_result = read_stats_for_provider(&settings, &provider);
+        let stats_result = read_stats_for_provider(&settings, &provider, &scan_cache, false);
+        if let Ok(result) = &stats_result {
+            remember_scan_diagnostics(&scan_diagnostics, &result.diagnostics);
+        }
         if let Some(request_id) = request_id {
             complete_external_tray_refresh(
                 &task_app,
                 request_id,
                 &provider,
-                stats_result.as_ref().map_err(String::as_str),
+                stats_result
+                    .as_ref()
+                    .map(|result| &result.stats)
+                    .map_err(String::as_str),
             );
         }
-        let stats = stats_result?;
+        let stats = stats_result?.stats;
 
         Ok::<_, String>(Some(ChooseHomeResult { settings, stats }))
     })
@@ -1640,13 +1748,18 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-fn read_stats_for_provider(settings: &Settings, provider: &str) -> Result<Stats, String> {
+fn read_stats_for_provider(
+    settings: &Settings,
+    provider: &str,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
     match provider {
-        "claude" => read_claude_stats(settings),
-        "copilot" => read_copilot_stats(settings),
-        "cursor" => read_cursor_stats(settings),
-        "chatgpt" => read_chatgpt_stats(settings),
-        _ => read_codex_stats(settings),
+        "claude" => read_claude_stats(settings, scan_cache, force),
+        "copilot" => read_copilot_stats(settings, scan_cache, force),
+        "cursor" => read_cursor_stats(settings, scan_cache, force),
+        "chatgpt" => read_chatgpt_stats(settings, scan_cache, force),
+        _ => read_codex_stats(settings, scan_cache, force),
     }
 }
 
@@ -2428,7 +2541,12 @@ fn codex_pricing() -> Pricing {
     }
 }
 
-fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
+fn read_codex_stats(
+    settings: &Settings,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
+    let started_at = Instant::now();
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, state_db, paths) = codex_paths(settings);
 
@@ -2455,11 +2573,49 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
         if changed {
             let _ = save_usage_history(&history);
         }
-        return Ok(stats);
+        return Ok(finish_scan(
+            "codex",
+            started_at,
+            stats,
+            ScanDiagnostics::empty("codex", force),
+        ));
     }
 
     let mut threads = read_codex_threads(&state_db)?;
-    let usage_events = read_codex_usage_events(&threads);
+    let rollout_threads = threads
+        .iter()
+        .filter(|thread| !thread.rollout_path.is_empty())
+        .map(|thread| (PathBuf::from(&thread.rollout_path), thread.clone()))
+        .collect::<HashMap<_, _>>();
+    let rollout_files = rollout_threads.keys().cloned().collect::<Vec<_>>();
+    let outcome = scan_cache.scan(
+        scan_request(
+            "codex",
+            "codex-rollout-v1",
+            std::slice::from_ref(&home),
+            rollout_files,
+            force,
+        ),
+        |path| {
+            File::open(path).map_err(|error| error.to_string())?;
+            let thread = rollout_threads
+                .get(path)
+                .ok_or_else(|| "Codex rollout no longer belongs to a known thread".to_string())?;
+            Ok(read_codex_usage_events(std::slice::from_ref(thread)))
+        },
+    );
+    let diagnostics = outcome.diagnostics.clone();
+    let mut usage_events = Vec::new();
+    for scanned_file in outcome.files {
+        let Some(thread) = rollout_threads.get(&scanned_file.path) else {
+            continue;
+        };
+        usage_events.extend(scanned_file.values.into_iter().map(|mut event| {
+            event.thread_id = thread.id.clone();
+            event.model = thread.model.clone();
+            event
+        }));
+    }
     let mut usage_by_thread: HashMap<String, Vec<UsageEvent>> = HashMap::new();
     for event in usage_events {
         usage_by_thread
@@ -2499,7 +2655,7 @@ fn read_codex_stats(settings: &Settings) -> Result<Stats, String> {
         let _ = save_usage_history(&history);
     }
 
-    Ok(stats)
+    Ok(finish_scan("codex", started_at, stats, diagnostics))
 }
 
 fn claude_home(settings: &Settings) -> PathBuf {
@@ -2970,7 +3126,16 @@ fn read_claude_account(home: &Path) -> Account {
     }
 }
 
-fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
+fn is_claude_session_file(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+}
+
+fn read_claude_stats(
+    settings: &Settings,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
+    let started_at = Instant::now();
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let home = claude_home(settings);
     let projects_path = home.join("projects");
@@ -2982,7 +3147,7 @@ fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
     });
 
     if !projects_path.exists() {
-        return Ok(empty_stats(
+        let stats = empty_stats(
             "Claude Code",
             "CC",
             chart_days,
@@ -2991,16 +3156,32 @@ fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
                 projects_path.to_string_lossy()
             ),
             paths,
+        );
+        return Ok(finish_scan(
+            "claude",
+            started_at,
+            stats,
+            ScanDiagnostics::empty("claude", force),
         ));
     }
 
-    let threads = WalkDir::new(&projects_path)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-        .filter_map(|entry| read_claude_session(entry.path()))
-        .collect::<Vec<_>>();
+    let files = scan_candidate_files(&projects_path, is_claude_session_file)
+        .map_err(|failures| scan_enumeration_error("claude", failures))?;
+    let outcome = scan_cache.scan(
+        scan_request(
+            "claude",
+            "claude-session-v1",
+            std::slice::from_ref(&projects_path),
+            files,
+            force,
+        ),
+        |path| {
+            File::open(path).map_err(|error| error.to_string())?;
+            Ok(read_claude_session(path).into_iter().collect())
+        },
+    );
+    let diagnostics = outcome.diagnostics.clone();
+    let threads = outcome.into_values();
 
     let account = read_claude_account(&home);
     let pricing = Some(Pricing {
@@ -3022,7 +3203,7 @@ fn read_claude_stats(settings: &Settings) -> Result<Stats, String> {
     );
     stats.rate_limits = estimated_rate_limits;
 
-    Ok(stats)
+    Ok(finish_scan("claude", started_at, stats, diagnostics))
 }
 
 fn vscode_user_roots() -> Vec<PathBuf> {
@@ -3667,37 +3848,40 @@ fn read_copilot_jsonish_file(path: &Path) -> Option<Thread> {
     }
 }
 
-fn read_copilot_sqlite_threads(path: &Path) -> Vec<Thread> {
-    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return Vec::new();
-    };
-    let Ok(mut statement) = connection.prepare("select key, cast(value as text) from ItemTable")
-    else {
-        return Vec::new();
-    };
-    let Ok(rows) = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) else {
-        return Vec::new();
-    };
-
-    rows.filter_map(Result::ok)
-        .filter_map(|(key, value)| {
-            let searchable = format!("{} {}", key, value).to_lowercase();
-            if !searchable.contains("copilot") && !searchable.contains("chat") {
-                return None;
-            }
-            let parsed = serde_json::from_str::<Value>(&value).ok()?;
-            read_copilot_values_as_thread(
-                path,
-                vec![parsed],
-                Some(&key),
-                "GitHub Copilot",
-                "VS Code",
-                "VS Code Workspace",
-            )
+fn try_read_copilot_sqlite_threads(path: &Path) -> Result<Vec<Thread>, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("select key, cast(value as text) from ItemTable")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .collect()
+        .map_err(|error| error.to_string())?;
+
+    let mut threads = Vec::new();
+    for row in rows {
+        let (key, value) = row.map_err(|error| error.to_string())?;
+        let searchable = format!("{} {}", key, value).to_lowercase();
+        if !searchable.contains("copilot") && !searchable.contains("chat") {
+            continue;
+        }
+        let Some(parsed) = serde_json::from_str::<Value>(&value).ok() else {
+            continue;
+        };
+        if let Some(thread) = read_copilot_values_as_thread(
+            path,
+            vec![parsed],
+            Some(&key),
+            "GitHub Copilot",
+            "VS Code",
+            "VS Code Workspace",
+        ) {
+            threads.push(thread);
+        }
+    }
+    Ok(threads)
 }
 
 fn read_chatgpt_values_as_thread(
@@ -3832,22 +4016,20 @@ fn read_chatgpt_data_file(path: &Path) -> Option<Thread> {
     })
 }
 
-fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
-    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return Vec::new();
-    };
-    let Ok(mut tables) = connection.prepare(
-        "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'",
-    ) else {
-        return Vec::new();
-    };
-    let Ok(table_rows) = tables.query_map([], |row| row.get::<_, String>(0)) else {
-        return Vec::new();
-    };
+fn try_read_chatgpt_sqlite_threads(path: &Path) -> Result<Vec<Thread>, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    let mut tables = connection
+        .prepare("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'")
+        .map_err(|error| error.to_string())?;
+    let table_rows = tables
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
 
     let mut threads = Vec::new();
     let mut scanned_rows = 0_usize;
-    for table in table_rows.filter_map(Result::ok) {
+    for table in table_rows {
+        let table = table.map_err(|error| error.to_string())?;
         if scanned_rows >= CHATGPT_SQLITE_ROW_SCAN_LIMIT {
             break;
         }
@@ -3858,36 +4040,35 @@ fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
             continue;
         }
         let remaining_rows = CHATGPT_SQLITE_ROW_SCAN_LIMIT - scanned_rows;
-        let Ok(mut statement) =
-            connection.prepare(&format!("select * from {table} limit {remaining_rows}"))
-        else {
-            continue;
-        };
+        let mut statement = connection
+            .prepare(&format!("select * from \"{table}\" limit {remaining_rows}"))
+            .map_err(|error| error.to_string())?;
         let column_count = statement.column_count();
         let column_names = statement
             .column_names()
             .iter()
             .map(|name| name.to_string())
             .collect::<Vec<_>>();
-        let Ok(rows) = statement.query_map([], |row| {
-            let mut object = serde_json::Map::new();
-            for index in 0..column_count {
-                let name = column_names
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("column{index}"));
-                if let Ok(value) = row.get::<_, String>(index) {
-                    object.insert(name, Value::String(value));
-                } else if let Ok(value) = row.get::<_, i64>(index) {
-                    object.insert(name, Value::Number(value.into()));
+        let rows = statement
+            .query_map([], |row| {
+                let mut object = serde_json::Map::new();
+                for index in 0..column_count {
+                    let name = column_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("column{index}"));
+                    if let Ok(value) = row.get::<_, String>(index) {
+                        object.insert(name, Value::String(value));
+                    } else if let Ok(value) = row.get::<_, i64>(index) {
+                        object.insert(name, Value::Number(value.into()));
+                    }
                 }
-            }
-            Ok(Value::Object(object))
-        }) else {
-            continue;
-        };
+                Ok(Value::Object(object))
+            })
+            .map_err(|error| error.to_string())?;
 
-        for (index, value) in rows.filter_map(Result::ok).enumerate() {
+        for (index, value) in rows.enumerate() {
+            let value = value.map_err(|error| error.to_string())?;
             scanned_rows += 1;
             let searchable = value.to_string().to_lowercase();
             if !["chatgpt", "openai", "conversation", "message", "gpt"]
@@ -3921,7 +4102,7 @@ fn read_chatgpt_sqlite_threads(path: &Path) -> Vec<Thread> {
         }
     }
 
-    threads
+    Ok(threads)
 }
 
 fn build_chatgpt_estimated_rate_limits(
@@ -4736,22 +4917,26 @@ fn read_cursor_jsonish_file(path: &Path) -> Option<Thread> {
     }
 }
 
+#[cfg(test)]
 fn read_cursor_sqlite_threads(path: &Path) -> Vec<Thread> {
-    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return Vec::new();
-    };
-    let Ok(mut statement) = connection.prepare("select key, cast(value as text) from ItemTable")
-    else {
-        return Vec::new();
-    };
-    let Ok(rows) = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }) else {
-        return Vec::new();
-    };
+    try_read_cursor_sqlite_threads(path).unwrap_or_default()
+}
+
+fn try_read_cursor_sqlite_threads(path: &Path) -> Result<Vec<Thread>, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("select key, cast(value as text) from ItemTable")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
 
     let mut threads = Vec::new();
-    for (key, value) in rows.filter_map(Result::ok) {
+    for row in rows {
+        let (key, value) = row.map_err(|error| error.to_string())?;
         let searchable = format!("{} {}", key, value).to_lowercase();
         if ![
             "cursor",
@@ -4776,30 +4961,38 @@ fn read_cursor_sqlite_threads(path: &Path) -> Vec<Thread> {
         }
     }
 
-    threads
+    Ok(threads)
 }
 
-fn scan_candidate_files(root: &Path, is_candidate: fn(&Path) -> bool) -> Vec<PathBuf> {
+fn scan_candidate_files(
+    root: &Path,
+    is_candidate: fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, usize> {
     if root.is_file() {
-        return is_candidate(root)
+        return Ok(is_candidate(root)
             .then(|| root.to_path_buf())
             .into_iter()
-            .collect();
+            .collect());
     }
 
     let mut visited_files = 0_usize;
     let mut files = Vec::new();
-    for entry in WalkDir::new(root)
-        .max_depth(DEFAULT_SCAN_MAX_DEPTH)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
+    let mut failures = 0_usize;
+    for entry in WalkDir::new(root).max_depth(DEFAULT_SCAN_MAX_DEPTH) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                failures += 1;
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
 
         visited_files += 1;
         if visited_files > DEFAULT_SCAN_MAX_FILES {
+            failures += 1;
             break;
         }
 
@@ -4809,7 +5002,16 @@ fn scan_candidate_files(root: &Path, is_candidate: fn(&Path) -> bool) -> Vec<Pat
         }
     }
 
-    files
+    if failures == 0 {
+        Ok(files)
+    } else {
+        Err(failures)
+    }
+}
+
+fn scan_enumeration_error(provider: &str, failures: usize) -> String {
+    eprintln!("[scan] provider={provider} enumeration_incomplete=true failed_entries={failures}");
+    format!("Unable to completely enumerate {provider} data files ({failures} failures)")
 }
 
 fn is_cursor_data_file(path: &Path) -> bool {
@@ -4901,41 +5103,62 @@ fn is_copilot_data_file(path: &Path) -> bool {
     path_text.contains("copilot") || path_text.contains("chat")
 }
 
-fn append_chatgpt_threads_from_path(threads: &mut Vec<Thread>, path: &Path) {
+fn read_chatgpt_threads_from_path(path: &Path) -> Result<Vec<Thread>, String> {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_lowercase();
     if ["sqlite", "sqlite3", "db"].contains(&extension.as_str()) {
-        threads.extend(read_chatgpt_sqlite_threads(path));
+        try_read_chatgpt_sqlite_threads(path)
     } else if extension == "data" {
-        threads.extend(read_chatgpt_data_file(path));
+        Ok(read_chatgpt_data_file(path).into_iter().collect())
     } else {
-        threads.extend(read_chatgpt_jsonish_file(path));
+        Ok(read_chatgpt_jsonish_file(path))
     }
 }
 
-fn read_chatgpt_stats(settings: &Settings) -> Result<Stats, String> {
+fn read_chatgpt_stats(
+    settings: &Settings,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
+    let started_at = Instant::now();
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = chatgpt_paths(settings);
 
     if !scan_roots.iter().any(|path| path.exists()) {
-        return Ok(empty_stats(
+        let stats = empty_stats(
             "ChatGPT",
             "CG",
             chart_days,
             format!("ChatGPT data not found at {}", home.to_string_lossy()),
             paths,
+        );
+        return Ok(finish_scan(
+            "chatgpt",
+            started_at,
+            stats,
+            ScanDiagnostics::empty("chatgpt", force),
         ));
     }
 
-    let mut threads = Vec::new();
+    let mut files = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        for path in scan_candidate_files(root, is_chatgpt_data_file) {
-            append_chatgpt_threads_from_path(&mut threads, &path);
-        }
+        files.extend(
+            scan_candidate_files(root, is_chatgpt_data_file)
+                .map_err(|failures| scan_enumeration_error("chatgpt", failures))?,
+        );
     }
+    let outcome = scan_cache.scan(
+        scan_request("chatgpt", "chatgpt-data-v1", &scan_roots, files, force),
+        |path| {
+            File::open(path).map_err(|error| error.to_string())?;
+            read_chatgpt_threads_from_path(path)
+        },
+    );
+    let diagnostics = outcome.diagnostics.clone();
+    let threads = outcome.into_values();
 
     let account = read_chatgpt_account(&scan_roots);
     let pricing = Some(Pricing {
@@ -4957,15 +5180,20 @@ fn read_chatgpt_stats(settings: &Settings) -> Result<Stats, String> {
     );
     stats.rate_limits = estimated_rate_limits;
 
-    Ok(stats)
+    Ok(finish_scan("chatgpt", started_at, stats, diagnostics))
 }
 
-fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
+fn read_copilot_stats(
+    settings: &Settings,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
+    let started_at = Instant::now();
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = copilot_paths(settings);
 
     if !scan_roots.iter().any(|path| path.exists()) {
-        return Ok(empty_stats(
+        let stats = empty_stats(
             "GitHub Copilot",
             "GH",
             chart_days,
@@ -4974,24 +5202,42 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
                 home.to_string_lossy()
             ),
             paths,
+        );
+        return Ok(finish_scan(
+            "copilot",
+            started_at,
+            stats,
+            ScanDiagnostics::empty("copilot", force),
         ));
     }
 
-    let mut threads = Vec::new();
+    let mut files = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        for path in scan_candidate_files(root, is_copilot_data_file) {
+        files.extend(
+            scan_candidate_files(root, is_copilot_data_file)
+                .map_err(|failures| scan_enumeration_error("copilot", failures))?,
+        );
+    }
+    let outcome = scan_cache.scan(
+        scan_request("copilot", "copilot-data-v1", &scan_roots, files, force),
+        |path| {
+            File::open(path).map_err(|error| error.to_string())?;
             if path
                 .file_name()
                 .map(|name| name.to_string_lossy())
                 .unwrap_or_default()
                 .eq_ignore_ascii_case("state.vscdb")
             {
-                threads.extend(read_copilot_sqlite_threads(&path));
-            } else if let Some(thread) = read_copilot_jsonish_file(&path) {
-                threads.push(thread);
+                try_read_copilot_sqlite_threads(path)
+            } else if let Some(thread) = read_copilot_jsonish_file(path) {
+                Ok(vec![thread])
+            } else {
+                Ok(Vec::new())
             }
-        }
-    }
+        },
+    );
+    let diagnostics = outcome.diagnostics.clone();
+    let threads = outcome.into_values();
 
     let account = read_github_copilot_account(&scan_roots);
     let pricing = Some(Pricing {
@@ -5000,7 +5246,7 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
         checked_at: "2026-06-30".to_string(),
     });
 
-    Ok(build_stats_from_threads(
+    let stats = build_stats_from_threads(
         threads,
         Local::now(),
         chart_days,
@@ -5009,15 +5255,21 @@ fn read_copilot_stats(settings: &Settings) -> Result<Stats, String> {
         None,
         false,
         paths,
-    ))
+    );
+    Ok(finish_scan("copilot", started_at, stats, diagnostics))
 }
 
-fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
+fn read_cursor_stats(
+    settings: &Settings,
+    scan_cache: &ScanCacheStore,
+    force: bool,
+) -> Result<StatsScanResult, String> {
+    let started_at = Instant::now();
     let chart_days = settings.chart_days.clamp(MIN_CHART_DAYS, MAX_CHART_DAYS);
     let (home, scan_roots, paths) = cursor_paths(settings);
 
     if !scan_roots.iter().any(|path| path.exists()) {
-        return Ok(empty_stats(
+        let stats = empty_stats(
             "Cursor",
             "CU",
             chart_days,
@@ -5026,24 +5278,42 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
                 home.to_string_lossy()
             ),
             paths,
+        );
+        return Ok(finish_scan(
+            "cursor",
+            started_at,
+            stats,
+            ScanDiagnostics::empty("cursor", force),
         ));
     }
 
-    let mut threads = Vec::new();
+    let mut files = Vec::new();
     for root in scan_roots.iter().filter(|path| path.exists()) {
-        for path in scan_candidate_files(root, is_cursor_data_file) {
+        files.extend(
+            scan_candidate_files(root, is_cursor_data_file)
+                .map_err(|failures| scan_enumeration_error("cursor", failures))?,
+        );
+    }
+    let outcome = scan_cache.scan(
+        scan_request("cursor", "cursor-data-v1", &scan_roots, files, force),
+        |path| {
+            File::open(path).map_err(|error| error.to_string())?;
             if path
                 .file_name()
                 .map(|name| name.to_string_lossy())
                 .unwrap_or_default()
                 .eq_ignore_ascii_case("state.vscdb")
             {
-                threads.extend(read_cursor_sqlite_threads(&path));
-            } else if let Some(thread) = read_cursor_jsonish_file(&path) {
-                threads.push(thread);
+                try_read_cursor_sqlite_threads(path)
+            } else if let Some(thread) = read_cursor_jsonish_file(path) {
+                Ok(vec![thread])
+            } else {
+                Ok(Vec::new())
             }
-        }
-    }
+        },
+    );
+    let diagnostics = outcome.diagnostics.clone();
+    let threads = outcome.into_values();
 
     let account = read_cursor_account(&scan_roots);
     let pricing = Some(Pricing {
@@ -5052,7 +5322,7 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
         checked_at: "2026-06-30".to_string(),
     });
 
-    Ok(build_stats_from_threads(
+    let stats = build_stats_from_threads(
         threads,
         Local::now(),
         chart_days,
@@ -5061,7 +5331,8 @@ fn read_cursor_stats(settings: &Settings) -> Result<Stats, String> {
         None,
         false,
         paths,
-    ))
+    );
+    Ok(finish_scan("cursor", started_at, stats, diagnostics))
 }
 
 fn main() {
@@ -5116,6 +5387,8 @@ fn main() {
             get_tray_status,
             open_main_window,
             get_stats,
+            rebuild_stats_cache,
+            get_scan_diagnostics,
             choose_home,
             start_window_drag,
             open_external,
@@ -5991,7 +6264,8 @@ mod tests {
         fs::write(root.join("notes.txt"), "not a data file").expect("non-candidate should exist");
         fs::write(root.join("copilot-chat.jsonl"), "{}").expect("candidate should exist");
 
-        let files = scan_candidate_files(&root, is_copilot_data_file);
+        let files = scan_candidate_files(&root, is_copilot_data_file)
+            .expect("fixture enumeration should be complete");
 
         assert_eq!(files.len(), 1);
         assert_eq!(
@@ -6619,6 +6893,17 @@ mod tests {
         assert_eq!(threads[0].tokens_used, 8);
 
         let _ = fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn sqlite_parser_surfaces_database_errors_for_cache_retry() {
+        let db_path = temp_jsonl_path("state.vscdb");
+        fs::write(&db_path, "not a sqlite database").expect("invalid database should be created");
+
+        let result = try_read_cursor_sqlite_threads(&db_path);
+
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
 
     #[test]
