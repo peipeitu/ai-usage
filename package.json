@@ -1,6 +1,6 @@
 {
   "name": "ai-usage",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A cross-platform desktop dashboard for local AI coding usage statistics.",
   "desktopName": "ai-usage",
   "license": "MIT",
